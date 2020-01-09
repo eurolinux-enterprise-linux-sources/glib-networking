@@ -2,7 +2,7 @@
 
 Name:           glib-networking
 Version:        2.28.6.1
-Release:        2.2%{?dist}
+Release:        2.4%{?dist}
 Summary:        Networking support for GLib
 
 Group:          Development/Libraries
@@ -19,6 +19,8 @@ BuildRequires:  ca-certificates
 
 Patch0: rh1101418-no-gnome-proxy.patch
 Patch1: rh1101418-libproxy-0.3.0.patch
+Patch2: rh1176719-priority-string.patch
+Patch3: rh1410438-handshake-crash.patch
 
 %description
 This package contains modules that extend the networking support in
@@ -29,6 +31,9 @@ implementations and a gnutls-based GTlsConnection implementation.
 %setup -q
 %patch0 -p1 -b .no-gnome-proxy
 %patch1 -p1 -b .libproxy-0.3.0
+# Backport of https://git.gnome.org/browse/glib-networking/commit/?id=f474ec2
+%patch2 -p1 -b .no-ssl3-client-version
+%patch3 -p1 -b .handshake-crash
 
 
 %build
@@ -61,6 +66,13 @@ gio-querymodules-%{__isa_bits} %{_libdir}/gio/modules
 
 
 %changelog
+* Mon Jan  9 2017 Dan Winship <danw@redhat.com> - 2.28.6.1-2.4
+- Fix a crash in gnome-panel (#1410438)
+
+* Fri Oct 14 2016 Tomas Popela <tpopelaw@redhat.com> - 2.28.6.1-2.3
+- gnutls: update default priority string and fallback rules
+- Resolves: rhbz#1176719
+
 * Mon Jul 14 2014 Dan Winship <danw@redhat.com> - 2.28.6.1-2.2
 - Add minimum glib2 version to BuildRequires (#1119162)
 
