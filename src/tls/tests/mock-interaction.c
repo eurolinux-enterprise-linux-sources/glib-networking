@@ -16,9 +16,6 @@
  * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
  * Boston, MA 02111-1307, USA.
  *
- * In addition, when the library is used with OpenSSL, a special
- * exception applies. Refer to the LICENSE_EXCEPTION file for details.
- *
  * Author: Stef Walter <stefw@collabora.co.uk>
  */
 
@@ -164,8 +161,6 @@ mock_interaction_finalize (GObject *object)
   MockInteraction *self = MOCK_INTERACTION (object);
 
   g_free (self->static_password);
-  g_clear_object (&self->static_certificate);
-  g_clear_error (&self->static_error);
 
   G_OBJECT_CLASS (mock_interaction_parent_class)->finalize (object);
 }

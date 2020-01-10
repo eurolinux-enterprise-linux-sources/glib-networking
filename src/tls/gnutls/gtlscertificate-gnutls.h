@@ -8,9 +8,6 @@
  * your option) any later version.
  *
  * See the included COPYING file for more information.
- *
- * In addition, when the library is used with OpenSSL, a special
- * exception applies. Refer to the LICENSE_EXCEPTION file for details.
  */
 
 #ifndef __G_TLS_CERTIFICATE_GNUTLS_H__
@@ -73,10 +70,6 @@ void                         g_tls_certificate_gnutls_set_issuer      (GTlsCerti
                                                                        GTlsCertificateGnutls *issuer);
 
 GTlsCertificateGnutls*       g_tls_certificate_gnutls_steal_issuer    (GTlsCertificateGnutls *gnutls);
-
-GTlsCertificateGnutls*       g_tls_certificate_gnutls_build_chain     (const gnutls_datum_t  *certs,
-                                                                       guint                  num_certs,
-                                                                       gnutls_x509_crt_fmt_t  format);
 
 G_END_DECLS
 

@@ -15,9 +15,6 @@
  * You should have received a copy of the GNU Lesser General
  * Public License along with this library; if not, see
  * <http://www.gnu.org/licenses/>.
- *
- * In addition, when the library is used with OpenSSL, a special
- * exception applies. Refer to the LICENSE_EXCEPTION file for details.
  */
 
 #include "config.h"
@@ -313,7 +310,7 @@ g_tls_certificate_gnutls_verify (GTlsCertificate     *cert,
   gnutls_x509_crt_t *chain;
   GTlsCertificateFlags gtls_flags;
   time_t t, now;
-
+  
   cert_gnutls = G_TLS_CERTIFICATE_GNUTLS (cert);
   for (num_certs = 0; cert_gnutls; cert_gnutls = cert_gnutls->priv->issuer)
     num_certs++;
@@ -373,47 +370,24 @@ g_tls_certificate_gnutls_real_copy (GTlsCertificateGnutls    *gnutls,
                                     const gchar              *interaction_id,
                                     gnutls_retr2_st          *st)
 {
-  GTlsCertificateGnutls *chain;
   gnutls_x509_crt_t cert;
   gnutls_datum_t data;
-  guint num_certs = 0;
   size_t size = 0;
-  int status;
 
-  /* We will do this loop twice. It's probably more efficient than
-   * re-allocating memory.
-   */
-  chain = gnutls;
-  while (chain != NULL)
-    {
-      num_certs++;
-      chain = chain->priv->issuer;
-    }
+  gnutls_x509_crt_export (gnutls->priv->cert, GNUTLS_X509_FMT_DER,
+                          NULL, &size);
+  data.data = g_malloc (size);
+  data.size = size;
+  gnutls_x509_crt_export (gnutls->priv->cert, GNUTLS_X509_FMT_DER,
+                          data.data, &size);
 
-  st->ncerts = 0;
-  st->cert.x509 = gnutls_malloc (sizeof (gnutls_x509_crt_t) * num_certs);
+  gnutls_x509_crt_init (&cert);
+  gnutls_x509_crt_import (cert, &data, GNUTLS_X509_FMT_DER);
+  g_free (data.data);
 
-  /* Now do the actual copy of the whole chain. */
-  chain = gnutls;
-  while (chain != NULL)
-    {
-      gnutls_x509_crt_export (chain->priv->cert, GNUTLS_X509_FMT_DER,
-                              NULL, &size);
-      data.data = g_malloc (size);
-      data.size = size;
-      gnutls_x509_crt_export (chain->priv->cert, GNUTLS_X509_FMT_DER,
-                              data.data, &size);
-
-      gnutls_x509_crt_init (&cert);
-      status = gnutls_x509_crt_import (cert, &data, GNUTLS_X509_FMT_DER);
-      g_warn_if_fail (status == 0);
-      g_free (data.data);
-
-      st->cert.x509[st->ncerts] = cert;
-      st->ncerts++;
-
-      chain = chain->priv->issuer;
-    }
+  st->ncerts = 1;
+  st->cert.x509 = gnutls_malloc (sizeof (gnutls_x509_crt_t));
+  st->cert.x509[0] = cert;
 
   if (gnutls->priv->key != NULL)
     {
@@ -511,8 +485,7 @@ static const struct {
   { GNUTLS_CERT_NOT_ACTIVATED, G_TLS_CERTIFICATE_NOT_ACTIVATED },
   { GNUTLS_CERT_EXPIRED, G_TLS_CERTIFICATE_EXPIRED },
   { GNUTLS_CERT_REVOKED, G_TLS_CERTIFICATE_REVOKED },
-  { GNUTLS_CERT_INSECURE_ALGORITHM, G_TLS_CERTIFICATE_INSECURE },
-  { GNUTLS_CERT_UNEXPECTED_OWNER, G_TLS_CERTIFICATE_BAD_IDENTITY }
+  { GNUTLS_CERT_INSECURE_ALGORITHM, G_TLS_CERTIFICATE_INSECURE }
 };
 static const int flags_map_size = G_N_ELEMENTS (flags_map);
 
@@ -546,9 +519,9 @@ g_tls_certificate_gnutls_convert_flags (guint gnutls_flags)
   return gtls_flags;
 }
 
-static gboolean
-verify_identity_hostname (GTlsCertificateGnutls *gnutls,
-			  GSocketConnectable    *identity)
+GTlsCertificateFlags
+g_tls_certificate_gnutls_verify_identity (GTlsCertificateGnutls *gnutls,
+					  GSocketConnectable    *identity)
 {
   const char *hostname;
 
@@ -557,71 +530,13 @@ verify_identity_hostname (GTlsCertificateGnutls *gnutls,
   else if (G_IS_NETWORK_SERVICE (identity))
     hostname = g_network_service_get_domain (G_NETWORK_SERVICE (identity));
   else
-    return FALSE;
+    hostname = NULL;
 
-  return gnutls_x509_crt_check_hostname (gnutls->priv->cert, hostname);
-}
-
-static gboolean
-verify_identity_ip (GTlsCertificateGnutls *gnutls,
-		    GSocketConnectable    *identity)
-{
-  GInetAddress *addr;
-  int i, ret = 0;
-  gsize addr_size;
-  const guint8 *addr_bytes;
-
-  if (G_IS_INET_SOCKET_ADDRESS (identity))
-    addr = g_object_ref (g_inet_socket_address_get_address (G_INET_SOCKET_ADDRESS (identity)));
-  else {
-    const char *hostname;
-
-    if (G_IS_NETWORK_ADDRESS (identity))
-      hostname = g_network_address_get_hostname (G_NETWORK_ADDRESS (identity));
-    else if (G_IS_NETWORK_SERVICE (identity))
-      hostname = g_network_service_get_domain (G_NETWORK_SERVICE (identity));
-    else
-      return FALSE;
-
-    addr = g_inet_address_new_from_string (hostname);
-    if (!addr)
-      return FALSE;
-  }
-
-  addr_bytes = g_inet_address_to_bytes (addr);
-  addr_size = g_inet_address_get_native_size (addr);
-
-  for (i = 0; ret >= 0; i++)
+  if (hostname)
     {
-      char san[500];
-      size_t san_size;
-
-      san_size = sizeof (san);
-      ret = gnutls_x509_crt_get_subject_alt_name (gnutls->priv->cert, i,
-						  san, &san_size, NULL);
-
-      if ((ret == GNUTLS_SAN_IPADDRESS) && (addr_size == san_size))
-	{
-	  if (memcmp (addr_bytes, san, addr_size) == 0)
-	    {
-	      g_object_unref (addr);
-	      return TRUE;
-	    }
-	}
+      if (gnutls_x509_crt_check_hostname (gnutls->priv->cert, hostname))
+	return 0;
     }
-
-  g_object_unref (addr);
-  return FALSE;
-}
-
-GTlsCertificateFlags
-g_tls_certificate_gnutls_verify_identity (GTlsCertificateGnutls *gnutls,
-					  GSocketConnectable    *identity)
-{
-  if (verify_identity_hostname (gnutls, identity))
-    return 0;
-  else if (verify_identity_ip (gnutls, identity))
-    return 0;
 
   /* FIXME: check sRVName and uniformResourceIdentifier
    * subjectAltNames, if appropriate for @identity.
@@ -654,106 +569,4 @@ g_tls_certificate_gnutls_get_bytes (GTlsCertificateGnutls *gnutls)
 
   g_object_get (gnutls, "certificate", &array, NULL);
   return g_byte_array_free_to_bytes (array);
-}
-
-static gnutls_x509_crt_t *
-convert_data_to_gnutls_certs (const gnutls_datum_t  *certs,
-                              guint                  num_certs,
-                              gnutls_x509_crt_fmt_t  format)
-{
-  gnutls_x509_crt_t *gnutls_certs;
-  guint i;
-
-  gnutls_certs = g_new (gnutls_x509_crt_t, num_certs);
-
-  for (i = 0; i < num_certs; i++)
-    {
-      if (gnutls_x509_crt_init (&gnutls_certs[i]) < 0)
-        {
-          i--;
-          goto error;
-        }
-    }
-
-  for (i = 0; i < num_certs; i++)
-    {
-      if (gnutls_x509_crt_import (gnutls_certs[i], &certs[i], format) < 0)
-        {
-          i = num_certs - 1;
-          goto error;
-        }
-    }
-
-  return gnutls_certs;
-
-error:
-  for (; i != G_MAXUINT; i--)
-    gnutls_x509_crt_deinit (gnutls_certs[i]);
-  g_free (gnutls_certs);
-  return NULL;
-}
-
-GTlsCertificateGnutls *
-g_tls_certificate_gnutls_build_chain (const gnutls_datum_t  *certs,
-                                      guint                  num_certs,
-                                      gnutls_x509_crt_fmt_t  format)
-{
-  GPtrArray *glib_certs;
-  gnutls_x509_crt_t *gnutls_certs;
-  GTlsCertificateGnutls *issuer;
-  GTlsCertificateGnutls *result;
-  guint i, j;
-
-  g_return_val_if_fail (certs, NULL);
-
-  gnutls_certs = convert_data_to_gnutls_certs (certs, num_certs, format);
-  if (!gnutls_certs)
-    return NULL;
-
-  glib_certs = g_ptr_array_new_full (num_certs, g_object_unref);
-  for (i = 0; i < num_certs; i++)
-    g_ptr_array_add (glib_certs, g_tls_certificate_gnutls_new (&certs[i], NULL));
-
-  /* Some servers send certs out of order, or will send duplicate
-   * certs, so we need to be careful when assigning the issuer of
-   * our new GTlsCertificateGnutls.
-   */
-  for (i = 0; i < num_certs; i++)
-    {
-      issuer = NULL;
-
-      /* Check if the cert issued itself */
-      if (gnutls_x509_crt_check_issuer (gnutls_certs[i], gnutls_certs[i]))
-        continue;
-
-      if (i < num_certs - 1 &&
-          gnutls_x509_crt_check_issuer (gnutls_certs[i], gnutls_certs[i + 1]))
-        {
-          issuer = glib_certs->pdata[i + 1];
-        }
-      else
-        {
-          for (j = 0; j < num_certs; j++)
-            {
-              if (j != i &&
-                  gnutls_x509_crt_check_issuer (gnutls_certs[i], gnutls_certs[j]))
-                {
-                  issuer = glib_certs->pdata[j];
-                  break;
-                }
-            }
-        }
-
-      if (issuer)
-        g_tls_certificate_gnutls_set_issuer (glib_certs->pdata[i], issuer);
-    }
-
-  result = g_object_ref (glib_certs->pdata[0]);
-  g_ptr_array_unref (glib_certs);
-
-  for (i = 0; i < num_certs; i++)
-    gnutls_x509_crt_deinit (gnutls_certs[i]);
-  g_free (gnutls_certs);
-
-  return result;
 }

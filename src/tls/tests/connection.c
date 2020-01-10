@@ -16,9 +16,6 @@
  * Public License along with this library; if not, see
  * <http://www.gnu.org/licenses/>.
  *
- * In addition, when the library is used with OpenSSL, a special
- * exception applies. Refer to the LICENSE_EXCEPTION file for details.
- *
  * Author: Stef Walter <stefw@collabora.co.uk>
  */
 
@@ -27,7 +24,6 @@
 #include "mock-interaction.h"
 
 #include <gio/gio.h>
-#include <gnutls/gnutls.h>
 
 #include <sys/types.h>
 #include <string.h>
@@ -75,7 +71,6 @@ typedef struct {
   GError *server_error;
   gboolean server_should_close;
   gboolean server_running;
-  GTlsCertificate *server_certificate;
 
   char buf[128];
   gssize nread, nwrote;
@@ -146,7 +141,6 @@ teardown_connection (TestConnection *test, gconstpointer data)
 
   g_clear_object (&test->address);
   g_clear_object (&test->identity);
-  g_clear_object (&test->server_certificate);
   g_main_loop_unref (test->loop);
   g_clear_error (&test->read_error);
   g_clear_error (&test->server_error);
@@ -168,8 +162,6 @@ start_server (TestConnection *test)
                                  G_SOCKET_TYPE_STREAM, G_SOCKET_PROTOCOL_TCP,
                                  NULL, &test->address, &error);
   g_assert_no_error (error);
-
-  g_object_unref (addr);
 
   /* The hostname in test->identity matches the server certificate. */
   iaddr = G_INET_SOCKET_ADDRESS (test->address);
@@ -267,15 +259,8 @@ on_incoming_connection (GSocketService     *service,
   GTlsCertificate *cert;
   GError *error = NULL;
 
-  if (test->server_certificate)
-    {
-      cert = g_object_ref (test->server_certificate);
-    }
-  else
-    {
-      cert = g_tls_certificate_new_from_file (tls_test_file_path ("server-and-key.pem"), &error);
-      g_assert_no_error (error);
-    }
+  cert = g_tls_certificate_new_from_file (tls_test_file_path ("server-and-key.pem"), &error);
+  g_assert_no_error (error);
 
   test->server_connection = g_tls_server_connection_new (G_IO_STREAM (connection),
                                                          cert, &error);
@@ -346,15 +331,8 @@ run_echo_server (GThreadedSocketService *service,
   gssize nread, nwrote, total;
   gchar buf[128];
 
-  if (test->server_certificate)
-    {
-      cert = g_object_ref (test->server_certificate);
-    }
-  else
-    {
-      cert = g_tls_certificate_new_from_file (tls_test_file_path ("server-and-key.pem"), &error);
-      g_assert_no_error (error);
-    }
+  cert = g_tls_certificate_new_from_file (tls_test_file_path ("server-and-key.pem"), &error);
+  g_assert_no_error (error);
 
   test->server_connection = g_tls_server_connection_new (G_IO_STREAM (connection),
                                                          cert, &error);
@@ -525,377 +503,6 @@ test_verified_connection (TestConnection *test,
   g_main_loop_run (test->loop);
 
   g_assert_no_error (test->read_error);
-  g_assert_no_error (test->server_error);
-}
-
-static void
-test_verified_chain (TestConnection *test,
-		     gconstpointer   data)
-{
-  GTlsBackend *backend;
-  GTlsCertificate *server_cert;
-  GTlsCertificate *intermediate_cert;
-  char *cert_data = NULL;
-  char *key_data = NULL;
-  GError *error = NULL;
-
-  backend = g_tls_backend_get_default ();
-
-  /* Prepare the intermediate cert. */
-  intermediate_cert = g_tls_certificate_new_from_file (tls_test_file_path ("intermediate-ca.pem"), &error);
-  g_assert_no_error (error);
-  g_assert (intermediate_cert);
-
-  /* Prepare the server cert. */
-  g_clear_pointer (&cert_data, g_free);
-  g_file_get_contents (tls_test_file_path ("server-intermediate.pem"),
-		       &cert_data, NULL, &error);
-  g_assert_no_error (error);
-  g_assert (cert_data);
-
-  g_file_get_contents (tls_test_file_path ("server-intermediate-key.pem"),
-		       &key_data, NULL, &error);
-  g_assert_no_error (error);
-  g_assert (key_data);
-
-  server_cert = g_initable_new (g_tls_backend_get_certificate_type (backend),
-				NULL, &error,
-                                "issuer", intermediate_cert,
-                                "certificate-pem", cert_data,
-                                "private-key-pem", key_data,
-                                NULL);
-  g_assert_no_error (error);
-  g_assert (server_cert);
-
-  g_object_unref (intermediate_cert);
-  g_free (cert_data);
-  g_free (key_data);
-
-  test->server_certificate = server_cert;
-  test_verified_connection (test, data);
-}
-
-static void
-test_verified_chain_with_redundant_root_cert (TestConnection *test,
-					      gconstpointer   data)
-{
-  GTlsBackend *backend;
-  GTlsCertificate *server_cert;
-  GTlsCertificate *intermediate_cert;
-  GTlsCertificate *root_cert;
-  char *cert_data = NULL;
-  char *key_data = NULL;
-  GError *error = NULL;
-
-  backend = g_tls_backend_get_default ();
-
-  /* The root is redundant. It should not hurt anything. */
-  root_cert = g_tls_certificate_new_from_file (tls_test_file_path ("ca.pem"), &error);
-  g_assert_no_error (error);
-  g_assert (root_cert);
-
-  /* Prepare the intermediate cert. */
-  g_file_get_contents (tls_test_file_path ("intermediate-ca.pem"),
-		       &cert_data, NULL, &error);
-  g_assert_no_error (error);
-  g_assert (cert_data);
-
-  intermediate_cert = g_initable_new (g_tls_backend_get_certificate_type (backend),
-				      NULL, &error,
-				      "issuer", root_cert,
-				      "certificate-pem", cert_data,
-				      NULL);
-  g_assert_no_error (error);
-  g_assert (intermediate_cert);
-
-  /* Prepare the server cert. */
-  g_clear_pointer (&cert_data, g_free);
-  g_file_get_contents (tls_test_file_path ("server-intermediate.pem"),
-		       &cert_data, NULL, &error);
-  g_assert_no_error (error);
-  g_assert (cert_data);
-
-  g_file_get_contents (tls_test_file_path ("server-intermediate-key.pem"),
-		       &key_data, NULL, &error);
-  g_assert_no_error (error);
-  g_assert (key_data);
-
-  server_cert = g_initable_new (g_tls_backend_get_certificate_type (backend),
-				NULL, &error,
-                                "issuer", intermediate_cert,
-                                "certificate-pem", cert_data,
-                                "private-key-pem", key_data,
-                                NULL);
-  g_assert_no_error (error);
-  g_assert (server_cert);
-
-  g_object_unref (intermediate_cert);
-  g_object_unref (root_cert);
-  g_free (cert_data);
-  g_free (key_data);
-
-  test->server_certificate = server_cert;
-  test_verified_connection (test, data);
-}
-
-static void
-test_verified_chain_with_duplicate_server_cert (TestConnection *test,
-						gconstpointer   data)
-{
-  /* This is another common server misconfiguration. Apache reads certificates
-   * from two configuration files: one for the server cert, and one for the rest
-   * of the chain. If the server cert is pasted into both files, it will be sent
-   * twice. We should be tolerant of this. */
-
-  GTlsBackend *backend;
-  GTlsCertificate *server_cert;
-  GTlsCertificate *extra_server_cert;
-  GTlsCertificate *intermediate_cert;
-  char *cert_data = NULL;
-  char *key_data = NULL;
-  GError *error = NULL;
-
-  backend = g_tls_backend_get_default ();
-
-  /* Prepare the intermediate cert. */
-  intermediate_cert = g_tls_certificate_new_from_file (tls_test_file_path ("intermediate-ca.pem"), &error);
-  g_assert_no_error (error);
-  g_assert (intermediate_cert);
-
-  /* Prepare the server cert. */
-  g_clear_pointer (&cert_data, g_free);
-  g_file_get_contents (tls_test_file_path ("server-intermediate.pem"),
-		       &cert_data, NULL, &error);
-  g_assert_no_error (error);
-  g_assert (cert_data);
-
-  g_file_get_contents (tls_test_file_path ("server-intermediate-key.pem"),
-		       &key_data, NULL, &error);
-  g_assert_no_error (error);
-  g_assert (key_data);
-
-  server_cert = g_initable_new (g_tls_backend_get_certificate_type (backend),
-				NULL, &error,
-                                "issuer", intermediate_cert,
-                                "certificate-pem", cert_data,
-                                NULL);
-  g_assert_no_error (error);
-  g_assert (server_cert);
-
-  /* Prepare the server cert... again. Private key must go on this one. */
-  extra_server_cert = g_initable_new (g_tls_backend_get_certificate_type (backend),
-				      NULL, &error,
-				      "issuer", server_cert,
-				      "certificate-pem", cert_data,
-				      "private-key-pem", key_data,
-				      NULL);
-  g_assert_no_error (error);
-  g_assert (extra_server_cert);
-
-  g_object_unref (intermediate_cert);
-  g_object_unref (server_cert);
-  g_free (cert_data);
-  g_free (key_data);
-
-  test->server_certificate = extra_server_cert;
-  test_verified_connection (test, data);
-}
-
-static void
-test_verified_unordered_chain (TestConnection *test,
-			       gconstpointer   data)
-{
-  GTlsBackend *backend;
-  GTlsCertificate *server_cert;
-  GTlsCertificate *intermediate_cert;
-  GTlsCertificate *root_cert;
-  char *cert_data = NULL;
-  char *key_data = NULL;
-  GError *error = NULL;
-
-  backend = g_tls_backend_get_default ();
-
-  /* Prepare the intermediate cert (to be sent last, out of order)! */
-  intermediate_cert = g_tls_certificate_new_from_file (tls_test_file_path ("intermediate-ca.pem"),
-						       &error);
-  g_assert_no_error (error);
-  g_assert (intermediate_cert);
-
-  g_file_get_contents (tls_test_file_path ("ca.pem"), &cert_data, NULL, &error);
-  g_assert_no_error (error);
-  g_assert (cert_data);
-
-  /* Prepare the root cert (to be sent in the middle of the chain). */
-  root_cert = g_initable_new (g_tls_backend_get_certificate_type (backend),
-			      NULL, &error,
-                              "issuer", intermediate_cert,
-                              "certificate-pem", cert_data,
-                              NULL);
-  g_assert_no_error (error);
-  g_assert (root_cert);
-
-  g_clear_pointer (&cert_data, g_free);
-  g_file_get_contents (tls_test_file_path ("server-intermediate.pem"),
-		       &cert_data, NULL, &error);
-  g_assert_no_error (error);
-  g_assert (cert_data);
-
-  g_file_get_contents (tls_test_file_path ("server-intermediate-key.pem"),
-		       &key_data, NULL, &error);
-  g_assert_no_error (error);
-  g_assert (key_data);
-
-  /* Prepare the server cert. */
-  server_cert = g_initable_new (g_tls_backend_get_certificate_type (backend),
-				NULL, &error,
-                                "issuer", root_cert,
-                                "certificate-pem", cert_data,
-                                "private-key-pem", key_data,
-                                NULL);
-  g_assert_no_error (error);
-  g_assert (server_cert);
-
-  g_object_unref (intermediate_cert);
-  g_object_unref (root_cert);
-  g_free (cert_data);
-  g_free (key_data);
-
-  test->server_certificate = server_cert;
-  test_verified_connection (test, data);
-}
-
-static void
-test_verified_chain_with_alternative_ca_cert (TestConnection *test,
-					      gconstpointer   data)
-{
-  GTlsBackend *backend;
-  GTlsCertificate *server_cert;
-  GTlsCertificate *intermediate_cert;
-  GTlsCertificate *root_cert;
-  char *cert_data = NULL;
-  char *key_data = NULL;
-  GError *error = NULL;
-
-  backend = g_tls_backend_get_default ();
-
-  /* This "root" cert is issued by a CA that is not in the trust store. So it's
-   * not really a root, but it has the same public key as a cert in the trust
-   * store. If the client insists on a traditional chain of trust, this will
-   * fail, since the issuer is untrusted. */
-  root_cert = g_tls_certificate_new_from_file (tls_test_file_path ("ca-alternative.pem"), &error);
-  g_assert_no_error (error);
-  g_assert (root_cert);
-
-  /* Prepare the intermediate cert. Modern TLS libraries are expected to notice
-   * that it is signed by the same public key as a certificate in the root
-   * store, and accept the certificate, ignoring the untrusted "root" sent next
-   * in the chain, which servers send for compatibility with clients that don't
-   * have the new CA cert in the trust store yet. (In this scenario, the old
-   * client still trusts the old CA cert.) */
-  g_file_get_contents (tls_test_file_path ("intermediate-ca.pem"),
-		       &cert_data, NULL, &error);
-  g_assert_no_error (error);
-  g_assert (cert_data);
-
-  intermediate_cert = g_initable_new (g_tls_backend_get_certificate_type (backend),
-				      NULL, &error,
-				      "issuer", root_cert,
-				      "certificate-pem", cert_data,
-				      NULL);
-  g_assert_no_error (error);
-  g_assert (intermediate_cert);
-
-  /* Prepare the server cert. */
-  g_clear_pointer (&cert_data, g_free);
-  g_file_get_contents (tls_test_file_path ("server-intermediate.pem"),
-		       &cert_data, NULL, &error);
-  g_assert_no_error (error);
-  g_assert (cert_data);
-
-  g_file_get_contents (tls_test_file_path ("server-intermediate-key.pem"),
-		       &key_data, NULL, &error);
-  g_assert_no_error (error);
-  g_assert (key_data);
-
-  server_cert = g_initable_new (g_tls_backend_get_certificate_type (backend),
-				NULL, &error,
-                                "issuer", intermediate_cert,
-                                "certificate-pem", cert_data,
-                                "private-key-pem", key_data,
-                                NULL);
-  g_assert_no_error (error);
-  g_assert (server_cert);
-
-  g_object_unref (intermediate_cert);
-  g_object_unref (root_cert);
-  g_free (cert_data);
-  g_free (key_data);
-
-  test->server_certificate = server_cert;
-  test_verified_connection (test, data);
-}
-
-static void
-test_invalid_chain_with_alternative_ca_cert (TestConnection *test,
-					     gconstpointer   data)
-{
-  GTlsBackend *backend;
-  GTlsCertificate *server_cert;
-  GTlsCertificate *root_cert;
-  GIOStream *connection;
-  char *cert_data = NULL;
-  char *key_data = NULL;
-  GError *error = NULL;
-
-  backend = g_tls_backend_get_default ();
-
-  /* This certificate has the same public key as a certificate in the root store. */
-  root_cert = g_tls_certificate_new_from_file (tls_test_file_path ("ca-alternative.pem"), &error);
-  g_assert_no_error (error);
-  g_assert (root_cert);
-
-  /* The intermediate cert is not sent. The chain should be rejected, since without intermediate.pem
-   * there is no proof that ca-alternative.pem signed server-intermediate.pem. */
-  g_file_get_contents (tls_test_file_path ("server-intermediate.pem"),
-		       &cert_data, NULL, &error);
-  g_assert_no_error (error);
-  g_assert (cert_data);
-
-  g_file_get_contents (tls_test_file_path ("server-intermediate-key.pem"),
-		       &key_data, NULL, &error);
-  g_assert_no_error (error);
-  g_assert (key_data);
-
-  server_cert = g_initable_new (g_tls_backend_get_certificate_type (backend),
-				NULL, &error,
-                                "issuer", root_cert,
-                                "certificate-pem", cert_data,
-                                "private-key-pem", key_data,
-                                NULL);
-  g_assert_no_error (error);
-  g_assert (server_cert);
-
-  g_object_unref (root_cert);
-  g_free (cert_data);
-  g_free (key_data);
-
-  test->server_certificate = server_cert;
-  connection = start_async_server_and_connect_to_it (test, G_TLS_AUTHENTICATION_NONE, TRUE);
-  test->client_connection = g_tls_client_connection_new (connection, test->identity, &error);
-  g_assert_no_error (error);
-  g_assert (test->client_connection);
-  g_object_unref (connection);
-
-  g_tls_connection_set_database (G_TLS_CONNECTION (test->client_connection), test->database);
-
-  /* Make sure this test doesn't expire. */
-  g_tls_client_connection_set_validation_flags (G_TLS_CLIENT_CONNECTION (test->client_connection),
-                                                G_TLS_CERTIFICATE_VALIDATE_ALL & ~G_TLS_CERTIFICATE_EXPIRED);
-
-  read_test_data_async (test);
-  g_main_loop_run (test->loop);
-
-  g_assert_error (test->read_error, G_TLS_ERROR, G_TLS_ERROR_BAD_CERTIFICATE);
   g_assert_no_error (test->server_error);
 }
 
@@ -1439,29 +1046,10 @@ test_simultaneous_async (TestConnection *test,
   g_assert_cmpstr (test->buf, ==, TEST_DATA);
 }
 
-static gboolean
-check_gnutls_has_rehandshaking_bug (void)
-{
-  const char *version = gnutls_check_version (NULL);
-
-  return (!strcmp (version, "3.1.27") ||
-	  !strcmp (version, "3.1.28") ||
-	  !strcmp (version, "3.2.19") ||
-	  !strcmp (version, "3.3.8") ||
-	  !strcmp (version, "3.3.9") ||
-          !strcmp (version, "3.3.10"));
-}
-
 static void
 test_simultaneous_async_rehandshake (TestConnection *test,
 				     gconstpointer   data)
 {
-  if (check_gnutls_has_rehandshaking_bug ())
-    {
-      g_test_skip ("test would fail due to gnutls bug 108690");
-      return;
-    }
-
   test->rehandshake = TRUE;
   test_simultaneous_async (test, data);
 }
@@ -1556,12 +1144,6 @@ static void
 test_simultaneous_sync_rehandshake (TestConnection *test,
 				    gconstpointer   data)
 {
-  if (check_gnutls_has_rehandshaking_bug ())
-    {
-      g_test_skip ("test would fail due to gnutls bug 108690");
-      return;
-    }
-
   test->rehandshake = TRUE;
   test_simultaneous_sync (test, data);
 }
@@ -1661,59 +1243,6 @@ test_close_during_handshake (TestConnection *test,
 }
 
 static void
-test_output_stream_close_during_handshake (TestConnection *test,
-                                           gconstpointer   data)
-{
-  GIOStream *connection;
-  GError *error = NULL;
-  GMainContext *context;
-  GMainLoop *loop;
-  gboolean handshake_complete = FALSE;
-
-  g_test_bug ("688751");
-
-  connection = start_async_server_and_connect_to_it (test, G_TLS_AUTHENTICATION_REQUESTED, TRUE);
-  test->client_connection = g_tls_client_connection_new (connection, test->identity, &error);
-  g_assert_no_error (error);
-  g_object_unref (connection);
-
-  loop = g_main_loop_new (NULL, FALSE);
-  g_signal_connect (test->client_connection, "notify::accepted-cas",
-                    G_CALLBACK (quit_loop_on_notify), loop);
-
-  context = g_main_context_new ();
-  g_main_context_push_thread_default (context);
-  g_tls_connection_handshake_async (G_TLS_CONNECTION (test->client_connection),
-				    G_PRIORITY_DEFAULT, NULL,
-				    handshake_completed, &handshake_complete);
-  g_main_context_pop_thread_default (context);
-
-  /* Now run the (default GMainContext) loop, which is needed for
-   * the server side of things. The client-side handshake will run in
-   * a thread, but its callback will never be invoked because its
-   * context isn't running.
-   */
-  g_main_loop_run (loop);
-  g_main_loop_unref (loop);
-
-  /* At this point handshake_thread() has started (and maybe
-   * finished), but handshake_thread_completed() (and thus
-   * finish_handshake()) has not yet run. Make sure close doesn't
-   * block.
-   */
-  g_output_stream_close (g_io_stream_get_output_stream (test->client_connection), NULL, &error);
-  g_assert_no_error (error);
-
-  /* We have to let the handshake_async() call finish now, or
-   * teardown_connection() will assert.
-   */
-  while (!handshake_complete)
-    g_main_context_iteration (context, TRUE);
-  g_main_context_unref (context);
-}
-
-
-static void
 test_write_during_handshake (TestConnection *test,
 			    gconstpointer   data)
 {
@@ -1786,10 +1315,7 @@ async_implicit_handshake_dispatch (GPollableInputStream *stream,
   keep_running = (-1 == size);
 
   if (keep_running)
-    {
-      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK);
-      g_error_free (error);
-    }
+    g_assert_error (error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK);
   else
     {
       g_assert_no_error (error);
@@ -1846,148 +1372,11 @@ test_async_implicit_handshake (TestConnection *test, gconstpointer   data)
   test->client_connection = NULL;
 }
 
-static void
-quit_on_handshake_complete (GObject      *object,
-			    GAsyncResult *result,
-			    gpointer      user_data)
-{
-  TestConnection *test = user_data;
-  GError *error = NULL;
-
-  g_tls_connection_handshake_finish (G_TLS_CONNECTION (object), result, &error);
-  g_assert_no_error (error);
-
-  g_main_loop_quit (test->loop);
-  return;
-}
-
-#define PRIORITY_SSL_FALLBACK "NORMAL:+VERS-SSL3.0"
-#define PRIORITY_TLS_FALLBACK "NORMAL:+VERS-TLS-ALL:-VERS-SSL3.0"
-
-static void
-test_fallback (gconstpointer data)
-{
-  const char *priority_string = (const char *) data;
-  char *test_name;
-
-  test_name = g_strdup_printf ("/tls/connection/fallback/subprocess/%s", priority_string);
-  g_test_trap_subprocess (test_name, 0, 0);
-  g_test_trap_assert_passed ();
-  g_free (test_name);
-}
-
-static void
-test_fallback_subprocess (TestConnection *test,
-			  gconstpointer   data)
-{
-  GIOStream *connection;
-  GTlsConnection *tlsconn;
-  GError *error = NULL;
-
-  connection = start_echo_server_and_connect_to_it (test);
-  test->client_connection = g_tls_client_connection_new (connection, NULL, &error);
-  g_assert_no_error (error);
-  tlsconn = G_TLS_CONNECTION (test->client_connection);
-  g_object_unref (connection);
-
-  g_tls_client_connection_set_validation_flags (G_TLS_CLIENT_CONNECTION (test->client_connection),
-                                                0);
-  g_tls_client_connection_set_use_ssl3 (G_TLS_CLIENT_CONNECTION (test->client_connection),
-					TRUE);
-  g_tls_connection_handshake_async (tlsconn, G_PRIORITY_DEFAULT, NULL,
-				    quit_on_handshake_complete, test);
-  g_main_loop_run (test->loop);
-
-  /* In 2.42 we don't have the API to test that the correct version was negotiated,
-   * so we merely test that the connection succeeded at all.
-   */
-
-  g_io_stream_close (test->client_connection, NULL, &error);
-  g_assert_no_error (error);
-}
-
-static void
-test_output_stream_close (TestConnection *test,
-                          gconstpointer   data)
-{
-  GIOStream *connection;
-  GError *error = NULL;
-  gboolean ret;
-  gboolean handshake_complete = FALSE;
-  gssize size;
-
-  connection = start_async_server_and_connect_to_it (test, G_TLS_AUTHENTICATION_NONE, TRUE);
-  test->client_connection = g_tls_client_connection_new (connection, test->identity, &error);
-  g_assert_no_error (error);
-  g_object_unref (connection);
-
-  /* No validation at all in this test */
-  g_tls_client_connection_set_validation_flags (G_TLS_CLIENT_CONNECTION (test->client_connection),
-                                                0);
-
-  g_tls_connection_handshake_async (G_TLS_CONNECTION (test->client_connection),
-                                    G_PRIORITY_DEFAULT, NULL,
-                                    handshake_completed, &handshake_complete);
-
-  while (!handshake_complete)
-    g_main_context_iteration (NULL, TRUE);
-
-  ret = g_output_stream_close (g_io_stream_get_output_stream (test->client_connection),
-      NULL, &error);
-  g_assert_no_error (error);
-  g_assert (ret);
-
-
-  /* Verify that double close returns TRUE */
-  ret = g_output_stream_close (g_io_stream_get_output_stream (test->client_connection),
-      NULL, &error);
-  g_assert_no_error (error);
-  g_assert (ret);
-
-  size = g_output_stream_write (g_io_stream_get_output_stream (test->client_connection),
-                                "data", 4, NULL, &error);
-  g_assert (size == -1);
-  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CLOSED);
-  g_clear_error (&error);
-
-  /* We closed the output stream, but not the input stream, so receiving
-   * data should still work.
-   */
-  read_test_data_async (test);
-  g_main_loop_run (test->loop);
-
-  g_assert_no_error (test->read_error);
-  g_assert_no_error (test->server_error);
-
-  ret = g_io_stream_close (test->client_connection, NULL, &error);
-  g_assert_no_error (error);
-  g_assert (ret);
-}
-
 int
 main (int   argc,
       char *argv[])
 {
   int ret;
-  int i;
-
-  /* Check if this is a subprocess, and set G_TLS_GNUTLS_PRIORITY
-   * appropriately if so.
-   */
-  for (i = 1; i < argc - 1; i++)
-    {
-      if (!strcmp (argv[i], "-p"))
-	{
-	  const char *priority = argv[i + 1];
-
-	  priority = strrchr (priority, '/');
-	  if (priority++ &&
-	      (g_str_has_prefix (priority, "NORMAL:") ||
-	       g_str_has_prefix (priority, "NONE:")))
-	    g_setenv ("G_TLS_GNUTLS_PRIORITY", priority, TRUE);
-	  break;
-	}
-    }
 
   g_test_init (&argc, &argv, NULL);
   g_test_bug_base ("http://bugzilla.gnome.org/");
@@ -2000,18 +1389,6 @@ main (int   argc,
               setup_connection, test_basic_connection, teardown_connection);
   g_test_add ("/tls/connection/verified", TestConnection, NULL,
               setup_connection, test_verified_connection, teardown_connection);
-  g_test_add ("/tls/connection/verified-chain", TestConnection, NULL,
-	      setup_connection, test_verified_chain, teardown_connection);
-  g_test_add ("/tls/connection/verified-chain-with-redundant-root-cert", TestConnection, NULL,
-	      setup_connection, test_verified_chain_with_redundant_root_cert, teardown_connection);
-  g_test_add ("/tls/connection/verified-chain-with-duplicate-server-cert", TestConnection, NULL,
-	      setup_connection, test_verified_chain_with_duplicate_server_cert, teardown_connection);
-  g_test_add ("/tls/connection/verified-unordered-chain", TestConnection, NULL,
-	      setup_connection, test_verified_unordered_chain, teardown_connection);
-  g_test_add ("/tls/connection/verified-chain-with-alternative-ca-cert", TestConnection, NULL,
-	      setup_connection, test_verified_chain_with_alternative_ca_cert, teardown_connection);
-  g_test_add ("/tls/connection/invalid-chain-with-alternative-ca-cert", TestConnection, NULL,
-	      setup_connection, test_invalid_chain_with_alternative_ca_cert, teardown_connection);
   g_test_add ("/tls/connection/client-auth", TestConnection, NULL,
               setup_connection, test_client_auth_connection, teardown_connection);
   g_test_add ("/tls/connection/client-auth-rehandshake", TestConnection, NULL,
@@ -2044,23 +1421,10 @@ main (int   argc,
               setup_connection, test_close_immediately, teardown_connection);
   g_test_add ("/tls/connection/close-during-handshake", TestConnection, NULL,
               setup_connection, test_close_during_handshake, teardown_connection);
-  g_test_add ("/tls/connection/close-output-stream-during-handshake", TestConnection, NULL,
-              setup_connection, test_output_stream_close_during_handshake, teardown_connection);
   g_test_add ("/tls/connection/write-during-handshake", TestConnection, NULL,
               setup_connection, test_write_during_handshake, teardown_connection);
   g_test_add ("/tls/connection/async-implicit-handshake", TestConnection, NULL,
               setup_connection, test_async_implicit_handshake, teardown_connection);
-  g_test_add ("/tls/connection/output-stream-close", TestConnection, NULL,
-              setup_connection, test_output_stream_close, teardown_connection);
-
-  g_test_add_data_func ("/tls/connection/fallback/SSL", PRIORITY_SSL_FALLBACK, test_fallback);
-  g_test_add ("/tls/connection/fallback/subprocess/" PRIORITY_SSL_FALLBACK,
-	      TestConnection, NULL,
-              setup_connection, test_fallback_subprocess, teardown_connection);
-  g_test_add_data_func ("/tls/connection/fallback/TLS", PRIORITY_TLS_FALLBACK, test_fallback);
-  g_test_add ("/tls/connection/fallback/subprocess/" PRIORITY_TLS_FALLBACK,
-	      TestConnection, NULL,
-              setup_connection, test_fallback_subprocess, teardown_connection);
 
   ret = g_test_run();
 
