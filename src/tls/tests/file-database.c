@@ -1,11 +1,13 @@
-/* GIO TLS tests
+/* -*- Mode: C; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/*
+ * GIO TLS tests
  *
  * Copyright 2011 Collabora, Ltd.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -15,6 +17,9 @@
  * You should have received a copy of the GNU Lesser General
  * Public License along with this library; if not, see
  * <http://www.gnu.org/licenses/>.
+ *
+ * In addition, when the library is used with OpenSSL, a special
+ * exception applies. Refer to the LICENSE_EXCEPTION file for details.
  *
  * Author: Stef Walter <stefw@collabora.co.uk>
  */
@@ -84,18 +89,18 @@ teardown_verify (TestVerify      *test,
 {
   g_assert (G_IS_TLS_CERTIFICATE (test->cert));
   g_object_add_weak_pointer (G_OBJECT (test->cert),
-			     (gpointer *)&test->cert);
+                             (gpointer *)&test->cert);
   g_object_unref (test->cert);
   g_assert (test->cert == NULL);
 
   g_assert (G_IS_TLS_DATABASE (test->database));
   g_object_add_weak_pointer (G_OBJECT (test->database),
-			     (gpointer *)&test->database);
+                             (gpointer *)&test->database);
   g_object_unref (test->database);
   g_assert (test->database == NULL);
 
   g_object_add_weak_pointer (G_OBJECT (test->identity),
-			     (gpointer *)&test->identity);
+                             (gpointer *)&test->identity);
   g_object_unref (test->identity);
   g_assert (test->identity == NULL);
 }
@@ -240,7 +245,7 @@ load_certificate_chain (const char  *filename,
                         GError     **error)
 {
   GList *certificates;
-  GTlsCertificate *chain = NULL;
+  GTlsCertificate *chain = NULL, *prev_chain = NULL;
   GTlsBackend *backend;
   GByteArray *der;
   GList *l;
@@ -253,12 +258,14 @@ load_certificate_chain (const char  *filename,
   certificates = g_list_reverse (certificates);
   for (l = certificates; l != NULL; l = g_list_next (l))
     {
+      prev_chain = chain;
       g_object_get (l->data, "certificate", &der, NULL);
       chain = g_object_new (g_tls_backend_get_certificate_type (backend),
                             "certificate", der,
-                            "issuer", chain,
+                            "issuer", prev_chain,
                             NULL);
       g_byte_array_unref (der);
+      g_clear_object (&prev_chain);
     }
 
   g_list_free_full (certificates, g_object_unref);
@@ -326,6 +333,7 @@ test_verify_with_incorrect_root_in_chain (void)
                                         identity, NULL, 0, NULL, &error);
   g_assert_no_error (error);
   errors &= ~G_TLS_CERTIFICATE_EXPIRED; /* so that this test doesn't expire */
+  errors &= ~G_TLS_CERTIFICATE_INSECURE; /* allow MD2 */
   g_assert_cmpuint (errors, ==, 0);
 
   g_object_unref (chain);
@@ -361,7 +369,7 @@ teardown_file_database (TestFileDatabase *test,
 {
   g_assert (G_IS_TLS_DATABASE (test->database));
   g_object_add_weak_pointer (G_OBJECT (test->database),
-			     (gpointer *)&test->database);
+                             (gpointer *)&test->database);
   g_object_unref (test->database);
   g_assert (test->database == NULL);
 }
@@ -461,14 +469,21 @@ certificate_is_in_list (GList *certificates,
 static void
 test_lookup_certificates_issued_by (void)
 {
-  /* This data is generated from the frob-certificate test tool in gcr library */
+  /* This data is generated from the frob-certificate test tool in gcr library.
+   * To regenerate (from e.g. a directory containing gcr and glib-networking):
+   *
+   * $ gcr/frob-certificate glib-networking/tls/tests/files/ca.pem
+   *
+   * Then copy the hex that is printed after "subject" (not "issuer"!) and add
+   * the missing 'x's.
+   */
   const guchar ISSUER[] = "\x30\x81\x86\x31\x13\x30\x11\x06\x0A\x09\x92\x26\x89\x93\xF2"
                           "\x2C\x64\x01\x19\x16\x03\x43\x4F\x4D\x31\x17\x30\x15\x06\x0A"
                           "\x09\x92\x26\x89\x93\xF2\x2C\x64\x01\x19\x16\x07\x45\x58\x41"
-                          "\x4D\x50\x4C\x45\x31\x1E\x30\x1C\x06\x03\x55\x04\x0B\x13\x15"
+                          "\x4D\x50\x4C\x45\x31\x1E\x30\x1C\x06\x03\x55\x04\x0B\x0C\x15"
                           "\x43\x65\x72\x74\x69\x66\x69\x63\x61\x74\x65\x20\x41\x75\x74"
                           "\x68\x6F\x72\x69\x74\x79\x31\x17\x30\x15\x06\x03\x55\x04\x03"
-                          "\x13\x0E\x63\x61\x2E\x65\x78\x61\x6D\x70\x6C\x65\x2E\x63\x6F"
+                          "\x0C\x0E\x63\x61\x2E\x65\x78\x61\x6D\x70\x6C\x65\x2E\x63\x6F"
                           "\x6D\x31\x1D\x30\x1B\x06\x09\x2A\x86\x48\x86\xF7\x0D\x01\x09"
                           "\x01\x16\x0E\x63\x61\x40\x65\x78\x61\x6D\x70\x6C\x65\x2E\x63"
                           "\x6F\x6D";
@@ -501,7 +516,6 @@ test_lookup_certificates_issued_by (void)
 
   g_list_free_full (certificates, g_object_unref);
   g_object_unref (database);
-  g_byte_array_unref (issuer_dn);
 }
 
 static void

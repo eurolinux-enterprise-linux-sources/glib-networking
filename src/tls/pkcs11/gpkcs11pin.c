@@ -1,11 +1,13 @@
-/* GIO - GLib Input, Output and Streaming Library
+/* -*- Mode: C; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/*
+ * GIO - GLib Input, Output and Streaming Library
  *
  * Copyright © 2011 Collabora Ltd.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -13,9 +15,11 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General
- * Public License along with this library; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place, Suite 330,
- * Boston, MA 02111-1307, USA.
+ * Public License along with this library; if not, see
+ * <http://www.gnu.org/licenses/>.
+ *
+ * In addition, when the library is used with OpenSSL, a special
+ * exception applies. Refer to the LICENSE_EXCEPTION file for details.
  *
  * Author: Stef Walter <stefw@collabora.co.uk>
  */
@@ -35,19 +39,18 @@ enum
   PROP_DESCRIPTION
 };
 
-G_DEFINE_TYPE (GPkcs11Pin, g_pkcs11_pin, G_TYPE_TLS_PASSWORD);
-
-struct _GPkcs11PinPrivate
+struct _GPkcs11Pin
 {
+  GTlsPassword parent_instance;
+
   P11KitPin *pin;
 };
+
+G_DEFINE_TYPE (GPkcs11Pin, g_pkcs11_pin, G_TYPE_TLS_PASSWORD);
 
 static void
 g_pkcs11_pin_init (GPkcs11Pin *self)
 {
-  self->priv = G_TYPE_INSTANCE_GET_PRIVATE (self,
-                                            G_TYPE_PKCS11_PIN,
-                                            GPkcs11PinPrivate);
 }
 
 static void
@@ -55,8 +58,8 @@ g_pkcs11_pin_finalize (GObject *object)
 {
   GPkcs11Pin *self = G_PKCS11_PIN (object);
 
-  if (self->priv->pin)
-    p11_kit_pin_unref (self->priv->pin);
+  if (self->pin)
+    p11_kit_pin_unref (self->pin);
 
   G_OBJECT_CLASS (g_pkcs11_pin_parent_class)->finalize (object);
 }
@@ -67,14 +70,14 @@ g_pkcs11_pin_get_value (GTlsPassword  *password,
 {
   GPkcs11Pin *self = G_PKCS11_PIN (password);
 
-  if (!self->priv->pin)
+  if (!self->pin)
     {
       if (length)
         *length = 0;
       return NULL;
     }
 
-  return p11_kit_pin_get_value (self->priv->pin, length);
+  return p11_kit_pin_get_value (self->pin, length);
 }
 
 static void
@@ -85,16 +88,16 @@ g_pkcs11_pin_set_value (GTlsPassword  *password,
 {
   GPkcs11Pin *self = G_PKCS11_PIN (password);
 
-  if (self->priv->pin)
+  if (self->pin)
     {
-      p11_kit_pin_unref (self->priv->pin);
-      self->priv->pin = NULL;
+      p11_kit_pin_unref (self->pin);
+      self->pin = NULL;
     }
 
   if (length < 0)
     length = strlen ((gchar *) value);
 
-  self->priv->pin = p11_kit_pin_new_for_buffer (value, length, destroy);
+  self->pin = p11_kit_pin_new_for_buffer (value, length, destroy);
 }
 
 static const gchar *
@@ -126,8 +129,6 @@ g_pkcs11_pin_class_init (GPkcs11PinClass *klass)
   password_class->get_default_warning = g_pkcs11_pin_get_default_warning;
 
   gobject_class->finalize     = g_pkcs11_pin_finalize;
-
-  g_type_class_add_private (klass, sizeof (GPkcs11PinPrivate));
 }
 
 GTlsPassword *
@@ -152,7 +153,7 @@ g_pkcs11_pin_steal_internal (GPkcs11Pin  *self)
 
   g_return_val_if_fail (G_IS_PKCS11_PIN (self), NULL);
 
-  pin = self->priv->pin;
-  self->priv->pin = NULL;
+  pin = self->pin;
+  self->pin = NULL;
   return pin;
 }

@@ -1,0 +1,16 @@
+--- glib-networking-2.56.0/find-ca-certificates.orig	2018-04-26 16:28:52.789161048 +0200
++++ glib-networking-2.56.0/find-ca-certificates	2018-04-26 16:29:01.055167000 +0200
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env python3
++#!/usr/bin/env python
+ 
+ import errno
+ import os
+--- glib-networking-2.56.0/meson_post_install.py.orig	2018-04-26 16:28:46.194156296 +0200
++++ glib-networking-2.56.0/meson_post_install.py	2018-04-26 16:29:15.074177106 +0200
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env python3
++#!/usr/bin/env python
+ 
+ import os
+ import subprocess

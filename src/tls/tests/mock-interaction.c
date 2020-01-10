@@ -1,20 +1,23 @@
+/* -*- Mode: C; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /*
  * Copyright (C) 2011 Collabora Ltd.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 02111-1307, USA.
+ * You should have received a copy of the GNU Lesser General
+ * Public License along with this library; if not, see
+ * <http://www.gnu.org/licenses/>.
+ *
+ * In addition, when the library is used with OpenSSL, a special
+ * exception applies. Refer to the LICENSE_EXCEPTION file for details.
  *
  * Author: Stef Walter <stefw@collabora.co.uk>
  */
@@ -25,6 +28,15 @@
 #include <gio/gio.h>
 
 #include "mock-interaction.h"
+
+struct _MockInteraction
+{
+  GTlsInteraction parent_instance;
+
+  gchar *static_password;
+  GTlsCertificate *static_certificate;
+  GError *static_error;
+};
 
 G_DEFINE_TYPE (MockInteraction, mock_interaction, G_TYPE_TLS_INTERACTION);
 
@@ -54,7 +66,7 @@ mock_interaction_ask_password_finish (GTlsInteraction    *interaction,
                                       GError            **error)
 {
   g_return_val_if_fail (g_task_is_valid (result, interaction),
-			G_TLS_INTERACTION_UNHANDLED);
+                        G_TLS_INTERACTION_UNHANDLED);
 
   if (g_task_had_error (G_TASK (result)))
     {
@@ -161,6 +173,8 @@ mock_interaction_finalize (GObject *object)
   MockInteraction *self = MOCK_INTERACTION (object);
 
   g_free (self->static_password);
+  g_clear_object (&self->static_certificate);
+  g_clear_error (&self->static_error);
 
   G_OBJECT_CLASS (mock_interaction_parent_class)->finalize (object);
 }

@@ -1,3 +1,4 @@
+/* -*- Mode: C; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /*
  * Copyright (C) 2010 Stefan Walter
  * Copyright (C) 2011 Collabora Ltd.
@@ -12,10 +13,12 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
- * 02111-1307, USA.
+ * You should have received a copy of the GNU Lesser General
+ * Public License along with this library; if not, see
+ * <http://www.gnu.org/licenses/>.
+ *
+ * In addition, when the library is used with OpenSSL, a special
+ * exception applies. Refer to the LICENSE_EXCEPTION file for details.
  */
 
 #include <glib.h>

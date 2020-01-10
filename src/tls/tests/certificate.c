@@ -1,11 +1,13 @@
-/* GIO TLS tests
+/* -*- Mode: C; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/*
+ * GIO TLS tests
  *
  * Copyright 2011 Collabora, Ltd.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -15,6 +17,9 @@
  * You should have received a copy of the GNU Lesser General
  * Public License along with this library; if not, see
  * <http://www.gnu.org/licenses/>.
+ *
+ * In addition, when the library is used with OpenSSL, a special
+ * exception applies. Refer to the LICENSE_EXCEPTION file for details.
  *
  * Author: Stef Walter <stefw@collabora.co.uk>
  */
@@ -73,7 +78,7 @@ setup_certificate (TestCertificate *test, gconstpointer data)
   g_assert_no_error (error);
 
   g_file_get_contents (tls_test_file_path ("server.der"),
-		       &contents, &length, &error);
+                       &contents, &length, &error);
   g_assert_no_error (error);
 
   test->cert_der = g_byte_array_new ();
@@ -220,6 +225,91 @@ test_create_certificate_with_issuer (TestCertificate   *test,
   g_assert (issuer == NULL);
 }
 
+static void
+test_create_certificate_chain (void)
+{
+  GTlsCertificate *cert, *intermediate, *root;
+  GError *error = NULL;
+
+  if (glib_check_version (2, 43, 0))
+    {
+      g_test_skip ("This test requires glib 2.43");
+      return;
+    }
+
+  cert = g_tls_certificate_new_from_file (tls_test_file_path ("chain.pem"), &error);
+  g_assert_no_error (error);
+  g_assert (G_IS_TLS_CERTIFICATE (cert));
+
+  intermediate = g_tls_certificate_get_issuer (cert);
+  g_assert (G_IS_TLS_CERTIFICATE (intermediate));
+
+  root = g_tls_certificate_get_issuer (intermediate);
+  g_assert (G_IS_TLS_CERTIFICATE (root));
+
+  g_assert (g_tls_certificate_get_issuer (root) == NULL);
+
+  g_object_unref (cert);
+}
+
+static void
+test_create_certificate_no_chain (void)
+{
+  GTlsCertificate *cert, *issuer;
+  GError *error = NULL;
+  gchar *cert_pem;
+  gsize cert_pem_length;
+
+  cert = g_tls_certificate_new_from_file (tls_test_file_path ("non-ca.pem"), &error);
+  g_assert_no_error (error);
+  g_assert (G_IS_TLS_CERTIFICATE (cert));
+
+  issuer = g_tls_certificate_get_issuer (cert);
+  g_assert (issuer == NULL);
+  g_object_unref (cert);
+
+  /* Truncate a valid chain certificate file. We should only get the
+   * first certificate.
+   */
+  g_file_get_contents (tls_test_file_path ("chain.pem"), &cert_pem,
+                       &cert_pem_length, &error);
+  g_assert_no_error (error);
+
+  cert = g_tls_certificate_new_from_pem (cert_pem, cert_pem_length - 100, &error);
+  g_free (cert_pem);
+  g_assert_no_error (error);
+  g_assert (G_IS_TLS_CERTIFICATE (cert));
+
+  issuer = g_tls_certificate_get_issuer (cert);
+  g_assert (issuer == NULL);
+  g_object_unref (cert);
+}
+
+static void
+test_create_list (void)
+{
+  GList *list;
+  GError *error = NULL;
+
+  list = g_tls_certificate_list_new_from_file (tls_test_file_path ("ca-roots.pem"), &error);
+  g_assert_no_error (error);
+  g_assert_cmpint (g_list_length (list), ==, 8);
+
+  g_list_free_full (list, g_object_unref);
+}
+
+static void
+test_create_list_bad (void)
+{
+  GList *list;
+  GError *error = NULL;
+
+  list = g_tls_certificate_list_new_from_file (tls_test_file_path ("ca-roots-bad.pem"), &error);
+  g_assert_error (error, G_TLS_ERROR, G_TLS_ERROR_BAD_CERTIFICATE);
+  g_assert_null (list);
+  g_error_free (error);
+}
+
 /* -----------------------------------------------------------------------------
  * CERTIFICATE VERIFY
  */
@@ -257,24 +347,24 @@ teardown_verify (TestVerify      *test,
 {
   g_assert (G_IS_TLS_CERTIFICATE (test->cert));
   g_object_add_weak_pointer (G_OBJECT (test->cert),
-			     (gpointer *)&test->cert);
+                             (gpointer *)&test->cert);
   g_object_unref (test->cert);
   g_assert (test->cert == NULL);
 
   g_assert (G_IS_TLS_CERTIFICATE (test->anchor));
   g_object_add_weak_pointer (G_OBJECT (test->anchor),
-			     (gpointer *)&test->anchor);
+                             (gpointer *)&test->anchor);
   g_object_unref (test->anchor);
   g_assert (test->anchor == NULL);
 
   g_assert (G_IS_TLS_DATABASE (test->database));
   g_object_add_weak_pointer (G_OBJECT (test->database),
-			     (gpointer *)&test->database);
+                             (gpointer *)&test->database);
   g_object_unref (test->database);
   g_assert (test->database == NULL);
 
   g_object_add_weak_pointer (G_OBJECT (test->identity),
-			     (gpointer *)&test->identity);
+                             (gpointer *)&test->identity);
   g_object_unref (test->identity);
   g_assert (test->identity == NULL);
 }
@@ -283,6 +373,8 @@ static void
 test_verify_certificate_good (TestVerify      *test,
                               gconstpointer    data)
 {
+  GSocketConnectable *identity;
+  GSocketAddress *addr;
   GTlsCertificateFlags errors;
 
   errors = g_tls_certificate_verify (test->cert, test->identity, test->anchor);
@@ -290,6 +382,16 @@ test_verify_certificate_good (TestVerify      *test,
 
   errors = g_tls_certificate_verify (test->cert, NULL, test->anchor);
   g_assert_cmpuint (errors, ==, 0);
+
+  identity = g_network_address_new ("192.168.1.10", 80);
+  errors = g_tls_certificate_verify (test->cert, identity, test->anchor);
+  g_assert_cmpuint (errors, ==, 0);
+  g_object_unref (identity);
+
+  addr = g_inet_socket_address_new_from_string ("192.168.1.10", 80);
+  errors = g_tls_certificate_verify (test->cert, G_SOCKET_CONNECTABLE (addr), test->anchor);
+  g_assert_cmpuint (errors, ==, 0);
+  g_object_unref (addr);
 }
 
 static void
@@ -298,13 +400,22 @@ test_verify_certificate_bad_identity (TestVerify      *test,
 {
   GSocketConnectable *identity;
   GTlsCertificateFlags errors;
+  GSocketAddress *addr;
 
   identity = g_network_address_new ("other.example.com", 80);
-
   errors = g_tls_certificate_verify (test->cert, identity, test->anchor);
   g_assert_cmpuint (errors, ==, G_TLS_CERTIFICATE_BAD_IDENTITY);
-
   g_object_unref (identity);
+
+  identity = g_network_address_new ("127.0.0.1", 80);
+  errors = g_tls_certificate_verify (test->cert, identity, test->anchor);
+  g_assert_cmpuint (errors, ==, G_TLS_CERTIFICATE_BAD_IDENTITY);
+  g_object_unref (identity);
+
+  addr = g_inet_socket_address_new_from_string ("127.0.0.1", 80);
+  errors = g_tls_certificate_verify (test->cert, G_SOCKET_CONNECTABLE (addr), test->anchor);
+  g_assert_cmpuint (errors, ==, G_TLS_CERTIFICATE_BAD_IDENTITY);
+  g_object_unref (addr);
 }
 
 static void
@@ -449,6 +560,10 @@ main (int   argc,
               setup_certificate, test_create_with_key_der, teardown_certificate);
   g_test_add ("/tls/certificate/create-with-issuer", TestCertificate, NULL,
               setup_certificate, test_create_certificate_with_issuer, teardown_certificate);
+  g_test_add_func ("/tls/certificate/create-chain", test_create_certificate_chain);
+  g_test_add_func ("/tls/certificate/create-no-chain", test_create_certificate_no_chain);
+  g_test_add_func ("/tls/certificate/create-list", test_create_list);
+  g_test_add_func ("/tls/certificate/create-list-bad", test_create_list_bad);
 
   g_test_add ("/tls/certificate/verify-good", TestVerify, NULL,
               setup_verify, test_verify_certificate_good, teardown_verify);
