@@ -15,6 +15,9 @@
  * You should have received a copy of the GNU Lesser General
  * Public License along with this library; if not, see
  * <http://www.gnu.org/licenses/>.
+ *
+ * In addition, when the library is used with OpenSSL, a special
+ * exception applies. Refer to the LICENSE_EXCEPTION file for details.
  */
 
 #include "config.h"
@@ -39,6 +42,8 @@ enum
   PROP_ACCEPTED_CAS
 };
 
+static void     g_tls_client_connection_gnutls_initable_interface_init (GInitableIface  *iface);
+
 static void g_tls_client_connection_gnutls_client_connection_interface_init (GTlsClientConnectionInterface *iface);
 
 static int g_tls_client_connection_gnutls_retrieve_function (gnutls_session_t             session,
@@ -48,7 +53,11 @@ static int g_tls_client_connection_gnutls_retrieve_function (gnutls_session_t   
 							     int                          pk_algos_length,
 							     gnutls_retr2_st             *st);
 
+static GInitableIface *g_tls_client_connection_gnutls_parent_initable_iface;
+
 G_DEFINE_TYPE_WITH_CODE (GTlsClientConnectionGnutls, g_tls_client_connection_gnutls, G_TYPE_TLS_CONNECTION_GNUTLS,
+			 G_IMPLEMENT_INTERFACE (G_TYPE_INITABLE,
+						g_tls_client_connection_gnutls_initable_interface_init)
 			 G_IMPLEMENT_INTERFACE (G_TYPE_TLS_CLIENT_CONNECTION,
 						g_tls_client_connection_gnutls_client_connection_interface_init));
 
@@ -57,8 +66,10 @@ struct _GTlsClientConnectionGnutlsPrivate
   GTlsCertificateFlags validation_flags;
   GSocketConnectable *server_identity;
   gboolean use_ssl3;
+  gboolean session_data_override;
 
   GBytes *session_id;
+  GBytes *session_data;
 
   gboolean cert_requested;
   GError *cert_error;
@@ -141,9 +152,34 @@ g_tls_client_connection_gnutls_finalize (GObject *object)
   g_clear_object (&gnutls->priv->server_identity);
   g_clear_pointer (&gnutls->priv->accepted_cas, g_ptr_array_unref);
   g_clear_pointer (&gnutls->priv->session_id, g_bytes_unref);
+  g_clear_pointer (&gnutls->priv->session_data, g_bytes_unref);
   g_clear_error (&gnutls->priv->cert_error);
 
   G_OBJECT_CLASS (g_tls_client_connection_gnutls_parent_class)->finalize (object);
+}
+
+static gboolean
+g_tls_client_connection_gnutls_initable_init (GInitable       *initable,
+					      GCancellable    *cancellable,
+					      GError         **error)
+{
+  GTlsConnectionGnutls *gnutls = G_TLS_CONNECTION_GNUTLS (initable);
+  gnutls_session_t session;
+  const gchar *hostname;
+
+  if (!g_tls_client_connection_gnutls_parent_initable_iface->
+      init (initable, cancellable, error))
+    return FALSE;
+
+  session = g_tls_connection_gnutls_get_session (gnutls);
+  hostname = get_server_identity (G_TLS_CLIENT_CONNECTION_GNUTLS (gnutls));
+  if (hostname)
+    {
+      gnutls_server_name_set (session, GNUTLS_NAME_DNS,
+                              hostname, strlen (hostname));
+    }
+
+  return TRUE;
 }
 
 static void
@@ -214,8 +250,13 @@ g_tls_client_connection_gnutls_set_property (GObject      *object,
 	{
 	  gnutls_session_t session = g_tls_connection_gnutls_get_session (G_TLS_CONNECTION_GNUTLS (gnutls));
 
-	  gnutls_server_name_set (session, GNUTLS_NAME_DNS,
-				  hostname, strlen (hostname));
+	  /* This will only be triggered if the identity is set after
+	   * initialization */
+	  if (session)
+            {
+              gnutls_server_name_set (session, GNUTLS_NAME_DNS,
+                                      hostname, strlen (hostname));
+            }
 	}
       break;
 
@@ -274,6 +315,8 @@ g_tls_client_connection_gnutls_failed (GTlsConnectionGnutls *conn)
 {
   GTlsClientConnectionGnutls *gnutls = G_TLS_CLIENT_CONNECTION_GNUTLS (conn);
 
+  gnutls->priv->session_data_override = FALSE;
+  g_clear_pointer (&gnutls->priv->session_data, g_bytes_unref);
   if (gnutls->priv->session_id)
     g_tls_backend_gnutls_remove_session (GNUTLS_CLIENT, gnutls->priv->session_id);
 }
@@ -284,7 +327,13 @@ g_tls_client_connection_gnutls_begin_handshake (GTlsConnectionGnutls *conn)
   GTlsClientConnectionGnutls *gnutls = G_TLS_CLIENT_CONNECTION_GNUTLS (conn);
 
   /* Try to get a cached session */
-  if (gnutls->priv->session_id)
+  if (gnutls->priv->session_data_override)
+    {
+      gnutls_session_set_data (g_tls_connection_gnutls_get_session (conn),
+                               g_bytes_get_data (gnutls->priv->session_data, NULL),
+                               g_bytes_get_size (gnutls->priv->session_data));
+    }
+  else if (gnutls->priv->session_id)
     {
       GBytes *session_data;
 
@@ -294,7 +343,8 @@ g_tls_client_connection_gnutls_begin_handshake (GTlsConnectionGnutls *conn)
 	  gnutls_session_set_data (g_tls_connection_gnutls_get_session (conn),
 				   g_bytes_get_data (session_data, NULL),
 				   g_bytes_get_size (session_data));
-	  g_bytes_unref (session_data);
+          g_clear_pointer (&gnutls->priv->session_data, g_bytes_unref);
+          gnutls->priv->session_data = session_data;
 	}
     }
 
@@ -306,6 +356,7 @@ g_tls_client_connection_gnutls_finish_handshake (GTlsConnectionGnutls  *conn,
 						 GError               **inout_error)
 {
   GTlsClientConnectionGnutls *gnutls = G_TLS_CLIENT_CONNECTION_GNUTLS (conn);
+  int resumed;
 
   g_assert (inout_error != NULL);
 
@@ -325,23 +376,51 @@ g_tls_client_connection_gnutls_finish_handshake (GTlsConnectionGnutls  *conn,
 	}
     }
 
-  if (gnutls->priv->session_id)
+  resumed = gnutls_session_is_resumed (g_tls_connection_gnutls_get_session (conn));
+  if (*inout_error || !resumed)
+    {
+      /* Clear session data since the server did not accept what we provided. */
+      gnutls->priv->session_data_override = FALSE;
+      g_clear_pointer (&gnutls->priv->session_data, g_bytes_unref);
+      if (gnutls->priv->session_id)
+        g_tls_backend_gnutls_remove_session (GNUTLS_CLIENT, gnutls->priv->session_id);
+    }
+
+  if (!*inout_error && !resumed)
     {
       gnutls_datum_t session_datum;
 
-      if (!*inout_error &&
-	  gnutls_session_get_data2 (g_tls_connection_gnutls_get_session (conn),
-				    &session_datum) == 0)
-	{
-	  GBytes *session_data = g_bytes_new_with_free_func (session_datum.data, session_datum.size,
-							     (GDestroyNotify)gnutls_free, session_datum.data);
+      if (gnutls_session_get_data2 (g_tls_connection_gnutls_get_session (conn),
+                                    &session_datum) == 0)
+        {
+          gnutls->priv->session_data = g_bytes_new_with_free_func (session_datum.data,
+                                                                   session_datum.size,
+                                                                   (GDestroyNotify)gnutls_free,
+                                                                   session_datum.data);
 
-	  g_tls_backend_gnutls_store_session (GNUTLS_CLIENT, gnutls->priv->session_id,
-					      session_data);
-	  g_bytes_unref (session_data);
-	}
-      else
-	g_tls_backend_gnutls_remove_session (GNUTLS_CLIENT, gnutls->priv->session_id);
+          g_tls_backend_gnutls_store_session (GNUTLS_CLIENT,
+                                              gnutls->priv->session_id,
+                                              gnutls->priv->session_data);
+        }
+    }
+}
+
+static void
+g_tls_client_connection_gnutls_copy_session_state (GTlsClientConnection *conn,
+                                                   GTlsClientConnection *source)
+{
+  GTlsClientConnectionGnutls *gnutls = G_TLS_CLIENT_CONNECTION_GNUTLS (conn);
+  GTlsClientConnectionGnutls *gnutls_source = G_TLS_CLIENT_CONNECTION_GNUTLS (source);
+
+  if (gnutls_source->priv->session_data)
+    {
+      gnutls->priv->session_data_override = TRUE;
+      gnutls->priv->session_data = g_bytes_ref (gnutls_source->priv->session_data);
+
+      if (gnutls->priv->session_id)
+        g_tls_backend_gnutls_store_session (GNUTLS_CLIENT,
+                                            gnutls->priv->session_id,
+                                            gnutls->priv->session_data);
     }
 }
 
@@ -371,4 +450,13 @@ g_tls_client_connection_gnutls_class_init (GTlsClientConnectionGnutlsClass *klas
 static void
 g_tls_client_connection_gnutls_client_connection_interface_init (GTlsClientConnectionInterface *iface)
 {
+  iface->copy_session_state = g_tls_client_connection_gnutls_copy_session_state;
+}
+
+static void
+g_tls_client_connection_gnutls_initable_interface_init (GInitableIface  *iface)
+{
+  g_tls_client_connection_gnutls_parent_initable_iface = g_type_interface_peek_parent (iface);
+
+  iface->init = g_tls_client_connection_gnutls_initable_init;
 }

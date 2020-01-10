@@ -16,6 +16,9 @@
  * Public License along with this library; if not, see
  * <http://www.gnu.org/licenses/>.
  *
+ * In addition, when the library is used with OpenSSL, a special
+ * exception applies. Refer to the LICENSE_EXCEPTION file for details.
+ *
  * Author: Stef Walter <stefw@collabora.co.uk>
  */
 
@@ -221,6 +224,66 @@ test_create_certificate_with_issuer (TestCertificate   *test,
 }
 
 static void
+test_create_certificate_chain (void)
+{
+  GTlsCertificate *cert, *intermediate, *root;
+  GError *error = NULL;
+
+  if (glib_check_version (2, 43, 0))
+    {
+      g_test_skip ("This test requires glib 2.43");
+      return;
+    }
+
+  cert = g_tls_certificate_new_from_file (tls_test_file_path ("chain.pem"), &error);
+  g_assert_no_error (error);
+  g_assert (G_IS_TLS_CERTIFICATE (cert));
+
+  intermediate = g_tls_certificate_get_issuer (cert);
+  g_assert (G_IS_TLS_CERTIFICATE (intermediate));
+
+  root = g_tls_certificate_get_issuer (intermediate);
+  g_assert (G_IS_TLS_CERTIFICATE (root));
+
+  g_assert (g_tls_certificate_get_issuer (root) == NULL);
+
+  g_object_unref (cert);
+}
+
+static void
+test_create_certificate_no_chain (void)
+{
+  GTlsCertificate *cert, *issuer;
+  GError *error = NULL;
+  gchar *cert_pem;
+  gsize cert_pem_length;
+
+  cert = g_tls_certificate_new_from_file (tls_test_file_path ("non-ca.pem"), &error);
+  g_assert_no_error (error);
+  g_assert (G_IS_TLS_CERTIFICATE (cert));
+
+  issuer = g_tls_certificate_get_issuer (cert);
+  g_assert (issuer == NULL);
+  g_object_unref (cert);
+
+  /* Truncate a valid chain certificate file. We should only get the
+   * first certificate.
+   */
+  g_file_get_contents (tls_test_file_path ("chain.pem"), &cert_pem,
+                       &cert_pem_length, &error);
+  g_assert_no_error (error);
+
+  cert = g_tls_certificate_new_from_pem (cert_pem, cert_pem_length - 100, &error);
+  g_free (cert_pem);
+  g_assert_no_error (error);
+  g_assert (G_IS_TLS_CERTIFICATE (cert));
+
+  issuer = g_tls_certificate_get_issuer (cert);
+  g_assert (issuer == NULL);
+  g_object_unref (cert);
+}
+
+static void
 test_create_list (void)
 {
   GList *list;
@@ -242,6 +305,7 @@ test_create_list_bad (void)
   list = g_tls_certificate_list_new_from_file (tls_test_file_path ("ca-roots-bad.pem"), &error);
   g_assert_error (error, G_TLS_ERROR, G_TLS_ERROR_BAD_CERTIFICATE);
   g_assert_null (list);
+  g_error_free (error);
 }
 
 /* -----------------------------------------------------------------------------
@@ -494,6 +558,8 @@ main (int   argc,
               setup_certificate, test_create_with_key_der, teardown_certificate);
   g_test_add ("/tls/certificate/create-with-issuer", TestCertificate, NULL,
               setup_certificate, test_create_certificate_with_issuer, teardown_certificate);
+  g_test_add_func ("/tls/certificate/create-chain", test_create_certificate_chain);
+  g_test_add_func ("/tls/certificate/create-no-chain", test_create_certificate_no_chain);
   g_test_add_func ("/tls/certificate/create-list", test_create_list);
   g_test_add_func ("/tls/certificate/create-list-bad", test_create_list_bad);
 

@@ -16,6 +16,9 @@
  * Public License along with this library; if not, see
  * <http://www.gnu.org/licenses/>.
  *
+ * In addition, when the library is used with OpenSSL, a special
+ * exception applies. Refer to the LICENSE_EXCEPTION file for details.
+ *
  * Author: Stef Walter <stefw@collabora.co.uk>
  */
 
@@ -27,6 +30,8 @@
 #include <glib/gi18n-lib.h>
 #include <gnutls/x509.h>
 
+#include "gtlscertificate-gnutls.h"
+
 static void g_tls_file_database_gnutls_file_database_interface_init (GTlsFileDatabaseInterface *iface);
 
 static void g_tls_file_database_gnutls_initable_interface_init (GInitableIface *iface);
@@ -36,7 +41,7 @@ G_DEFINE_TYPE_WITH_CODE (GTlsFileDatabaseGnutls, g_tls_file_database_gnutls, G_T
                                                 g_tls_file_database_gnutls_file_database_interface_init);
                          G_IMPLEMENT_INTERFACE (G_TYPE_INITABLE,
                                                 g_tls_file_database_gnutls_initable_interface_init);
-);
+			 );
 
 enum
 {
@@ -48,6 +53,7 @@ struct _GTlsFileDatabaseGnutlsPrivate
 {
   /* read-only after construct */
   gchar *anchor_filename;
+  gnutls_x509_trust_list_t trust_list;
 
   /* protected by mutex */
   GMutex mutex;
@@ -118,7 +124,7 @@ bytes_multi_table_lookup_ref_all (GHashTable *table,
 {
   GPtrArray *multi;
   GList *list = NULL;
-  gint i;
+  guint i;
 
   multi = g_hash_table_lookup (table, key);
   if (multi == NULL)
@@ -180,11 +186,11 @@ create_handles_array_unlocked (const gchar *filename,
 }
 
 static gboolean
-load_anchor_file (const gchar *filename,
-                  GHashTable  *subjects,
-                  GHashTable  *issuers,
-                  GHashTable  *complete,
-                  GError     **error)
+load_anchor_file (const gchar  *filename,
+                  GHashTable   *subjects,
+                  GHashTable   *issuers,
+                  GHashTable   *complete,
+                  GError      **error)
 {
   GList *list, *l;
   gnutls_x509_crt_t cert;
@@ -253,25 +259,15 @@ g_tls_file_database_gnutls_finalize (GObject *object)
 {
   GTlsFileDatabaseGnutls *self = G_TLS_FILE_DATABASE_GNUTLS (object);
 
-  if (self->priv->subjects)
-    g_hash_table_destroy (self->priv->subjects);
-  self->priv->subjects = NULL;
-
-  if (self->priv->issuers)
-    g_hash_table_destroy (self->priv->issuers);
-  self->priv->issuers = NULL;
-
-  if (self->priv->complete)
-    g_hash_table_destroy (self->priv->complete);
-  self->priv->complete = NULL;
-
-  if (self->priv->handles)
-    g_hash_table_destroy (self->priv->handles);
-  self->priv->handles = NULL;
-
-  g_free (self->priv->anchor_filename);
-  self->priv->anchor_filename = NULL;
-
+  g_clear_pointer (&self->priv->subjects, g_hash_table_destroy);
+  g_clear_pointer (&self->priv->issuers, g_hash_table_destroy);
+  g_clear_pointer (&self->priv->complete, g_hash_table_destroy);
+  g_clear_pointer (&self->priv->handles, g_hash_table_destroy);
+  if (self->priv->anchor_filename)
+    {
+      g_free (self->priv->anchor_filename);
+      gnutls_x509_trust_list_deinit (self->priv->trust_list, 1);
+    }
   g_mutex_clear (&self->priv->mutex);
 
   G_OBJECT_CLASS (g_tls_file_database_gnutls_parent_class)->finalize (object);
@@ -302,21 +298,29 @@ g_tls_file_database_gnutls_set_property (GObject      *object,
                                          GParamSpec   *pspec)
 {
   GTlsFileDatabaseGnutls *self = G_TLS_FILE_DATABASE_GNUTLS (object);
-  gchar *anchor_path;
+  const char *anchor_path;
 
   switch (prop_id)
     {
     case PROP_ANCHORS:
-      anchor_path = g_value_dup_string (value);
+      anchor_path = g_value_get_string (value);
       if (anchor_path && !g_path_is_absolute (anchor_path))
-        {
-          g_warning ("The anchor file name for used with a GTlsFileDatabase "
-                     "must be an absolute path, and not relative: %s", anchor_path);
-        }
-      else
-        {
-          self->priv->anchor_filename = anchor_path;
-        }
+	{
+	  g_warning ("The anchor file name used with a GTlsFileDatabase "
+		     "must be an absolute path, and not relative: %s", anchor_path);
+	  return;
+	}
+
+      if (self->priv->anchor_filename)
+	{
+	  g_free (self->priv->anchor_filename);
+	  gnutls_x509_trust_list_deinit (self->priv->trust_list, 1);
+	}
+      self->priv->anchor_filename = g_strdup (anchor_path);
+      gnutls_x509_trust_list_init (&self->priv->trust_list, 0);
+      gnutls_x509_trust_list_add_trust_file (self->priv->trust_list,
+					     anchor_path, NULL,
+					     GNUTLS_X509_FMT_PEM, 0, 0);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -332,9 +336,9 @@ g_tls_file_database_gnutls_init (GTlsFileDatabaseGnutls *self)
   g_mutex_init (&self->priv->mutex);
 }
 
-static gchar*
-g_tls_file_database_gnutls_create_certificate_handle (GTlsDatabase            *database,
-                                                      GTlsCertificate         *certificate)
+static gchar *
+g_tls_file_database_gnutls_create_certificate_handle (GTlsDatabase    *database,
+                                                      GTlsCertificate *certificate)
 {
   GTlsFileDatabaseGnutls *self = G_TLS_FILE_DATABASE_GNUTLS (database);
   GBytes *der;
@@ -359,13 +363,13 @@ g_tls_file_database_gnutls_create_certificate_handle (GTlsDatabase            *d
   return handle;
 }
 
-static GTlsCertificate*
-g_tls_file_database_gnutls_lookup_certificate_for_handle (GTlsDatabase            *database,
-                                                          const gchar             *handle,
-                                                          GTlsInteraction         *interaction,
-                                                          GTlsDatabaseLookupFlags  flags,
-                                                          GCancellable            *cancellable,
-                                                          GError                 **error)
+static GTlsCertificate *
+g_tls_file_database_gnutls_lookup_certificate_for_handle (GTlsDatabase             *database,
+                                                          const gchar              *handle,
+                                                          GTlsInteraction          *interaction,
+                                                          GTlsDatabaseLookupFlags   flags,
+                                                          GCancellable             *cancellable,
+                                                          GError                  **error)
 {
   GTlsFileDatabaseGnutls *self = G_TLS_FILE_DATABASE_GNUTLS (database);
   GTlsCertificate *cert;
@@ -407,53 +411,13 @@ g_tls_file_database_gnutls_lookup_certificate_for_handle (GTlsDatabase          
   return cert;
 }
 
-static gboolean
-g_tls_file_database_gnutls_lookup_assertion (GTlsDatabaseGnutls          *database,
-                                             GTlsCertificateGnutls       *certificate,
-                                             GTlsDatabaseGnutlsAssertion  assertion,
-                                             const gchar                 *purpose,
-                                             GSocketConnectable          *identity,
-                                             GCancellable                *cancellable,
-                                             GError                     **error)
-{
-  GTlsFileDatabaseGnutls *self = G_TLS_FILE_DATABASE_GNUTLS (database);
-  GBytes *der = NULL;
-  gboolean contains;
-
-  if (g_cancellable_set_error_if_cancelled (cancellable, error))
-    return FALSE;
-
-  /* We only have anchored certificate assertions here */
-  if (assertion != G_TLS_DATABASE_GNUTLS_ANCHORED_CERTIFICATE)
-    return FALSE;
-
-  /*
-   * TODO: We should be parsing any Extended Key Usage attributes and
-   * comparing them to the purpose.
-   */
-
-  der = g_tls_certificate_gnutls_get_bytes (certificate);
-
-  g_mutex_lock (&self->priv->mutex);
-  contains = g_hash_table_lookup (self->priv->complete, der) ? TRUE : FALSE;
-  g_mutex_unlock (&self->priv->mutex);
-
-  g_bytes_unref (der);
-
-  if (g_cancellable_set_error_if_cancelled (cancellable, error))
-    return FALSE;
-
-  /* All certificates in our file are anchored certificates */
-  return contains;
-}
-
-static GTlsCertificate*
-g_tls_file_database_gnutls_lookup_certificate_issuer (GTlsDatabase           *database,
-                                                      GTlsCertificate        *certificate,
-                                                      GTlsInteraction        *interaction,
-                                                      GTlsDatabaseLookupFlags flags,
-                                                      GCancellable           *cancellable,
-                                                      GError                **error)
+static GTlsCertificate *
+g_tls_file_database_gnutls_lookup_certificate_issuer (GTlsDatabase             *database,
+                                                      GTlsCertificate          *certificate,
+                                                      GTlsInteraction          *interaction,
+                                                      GTlsDatabaseLookupFlags   flags,
+                                                      GCancellable             *cancellable,
+                                                      GError                  **error)
 {
   GTlsFileDatabaseGnutls *self = G_TLS_FILE_DATABASE_GNUTLS (database);
   gnutls_datum_t dn = { NULL, 0 };
@@ -506,13 +470,13 @@ g_tls_file_database_gnutls_lookup_certificate_issuer (GTlsDatabase           *da
   return issuer;
 }
 
-static GList*
-g_tls_file_database_gnutls_lookup_certificates_issued_by (GTlsDatabase           *database,
-                                                          GByteArray             *issuer_raw_dn,
-                                                          GTlsInteraction        *interaction,
-                                                          GTlsDatabaseLookupFlags flags,
-                                                          GCancellable           *cancellable,
-                                                          GError                **error)
+static GList *
+g_tls_file_database_gnutls_lookup_certificates_issued_by (GTlsDatabase             *database,
+                                                          GByteArray               *issuer_raw_dn,
+                                                          GTlsInteraction          *interaction,
+                                                          GTlsDatabaseLookupFlags   flags,
+                                                          GCancellable             *cancellable,
+                                                          GError                  **error)
 {
   GTlsFileDatabaseGnutls *self = G_TLS_FILE_DATABASE_GNUTLS (database);
   GBytes *issuer;
@@ -557,11 +521,98 @@ g_tls_file_database_gnutls_lookup_certificates_issued_by (GTlsDatabase          
 }
 
 static void
+convert_certificate_chain_to_gnutls (GTlsCertificateGnutls  *chain,
+                                     gnutls_x509_crt_t     **gnutls_chain,
+                                     guint                  *gnutls_chain_length)
+{
+  GTlsCertificate *cert;
+  guint i;
+
+  g_assert (gnutls_chain);
+  g_assert (gnutls_chain_length);
+
+  for (*gnutls_chain_length = 0, cert = G_TLS_CERTIFICATE (chain);
+       cert; cert = g_tls_certificate_get_issuer (cert))
+    ++(*gnutls_chain_length);
+
+  *gnutls_chain = g_new0 (gnutls_x509_crt_t, *gnutls_chain_length);
+
+  for (i = 0, cert = G_TLS_CERTIFICATE (chain);
+       cert; cert = g_tls_certificate_get_issuer (cert), ++i)
+    (*gnutls_chain)[i] = g_tls_certificate_gnutls_get_cert (G_TLS_CERTIFICATE_GNUTLS (cert));
+
+  g_assert (i == *gnutls_chain_length);
+}
+
+static GTlsCertificateFlags
+g_tls_file_database_gnutls_verify_chain (GTlsDatabase             *database,
+					 GTlsCertificate          *chain,
+					 const gchar              *purpose,
+					 GSocketConnectable       *identity,
+					 GTlsInteraction          *interaction,
+					 GTlsDatabaseVerifyFlags   flags,
+					 GCancellable             *cancellable,
+					 GError                  **error)
+{
+  GTlsFileDatabaseGnutls *self;
+  GTlsCertificateFlags result;
+  guint gnutls_result;
+  gnutls_x509_crt_t *certs;
+  guint certs_length;
+  const char *hostname = NULL;
+  char *free_hostname = NULL;
+  int gerr;
+
+  g_return_val_if_fail (G_IS_TLS_CERTIFICATE_GNUTLS (chain),
+                        G_TLS_CERTIFICATE_GENERIC_ERROR);
+  g_assert (purpose);
+
+  if (g_cancellable_set_error_if_cancelled (cancellable, error))
+    return G_TLS_CERTIFICATE_GENERIC_ERROR;
+
+  self = G_TLS_FILE_DATABASE_GNUTLS (database);
+
+  convert_certificate_chain_to_gnutls (G_TLS_CERTIFICATE_GNUTLS (chain),
+                                       &certs, &certs_length);
+  gerr = gnutls_x509_trust_list_verify_crt (self->priv->trust_list,
+					    certs, certs_length,
+					    0, &gnutls_result, NULL);
+
+  if (gerr != 0 || g_cancellable_set_error_if_cancelled (cancellable, error))
+    {
+      g_free (certs);
+      return G_TLS_CERTIFICATE_GENERIC_ERROR;
+    }
+
+  result = g_tls_certificate_gnutls_convert_flags (gnutls_result);
+
+  if (G_IS_NETWORK_ADDRESS (identity))
+    hostname = g_network_address_get_hostname (G_NETWORK_ADDRESS (identity));
+  else if (G_IS_NETWORK_SERVICE (identity))
+    hostname = g_network_service_get_domain (G_NETWORK_SERVICE (identity));
+  else if (G_IS_INET_SOCKET_ADDRESS (identity))
+    {
+      GInetAddress *addr;
+
+      addr = g_inet_socket_address_get_address (G_INET_SOCKET_ADDRESS (identity));
+      hostname = free_hostname = g_inet_address_to_string (addr);
+    }
+  if (hostname)
+    {
+      if (!gnutls_x509_crt_check_hostname (certs[0], hostname))
+	result |= G_TLS_CERTIFICATE_BAD_IDENTITY;
+      g_free (free_hostname);
+    }
+
+  g_free (certs);
+  return result;
+}
+
+static void
 g_tls_file_database_gnutls_class_init (GTlsFileDatabaseGnutlsClass *klass)
 {
   GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
   GTlsDatabaseClass *database_class = G_TLS_DATABASE_CLASS (klass);
-  GTlsDatabaseGnutlsClass *gnutls_class = G_TLS_DATABASE_GNUTLS_CLASS (klass);
 
   g_type_class_add_private (klass, sizeof (GTlsFileDatabaseGnutlsPrivate));
 
@@ -573,7 +624,7 @@ g_tls_file_database_gnutls_class_init (GTlsFileDatabaseGnutlsClass *klass)
   database_class->lookup_certificate_for_handle = g_tls_file_database_gnutls_lookup_certificate_for_handle;
   database_class->lookup_certificate_issuer = g_tls_file_database_gnutls_lookup_certificate_issuer;
   database_class->lookup_certificates_issued_by = g_tls_file_database_gnutls_lookup_certificates_issued_by;
-  gnutls_class->lookup_assertion = g_tls_file_database_gnutls_lookup_assertion;
+  database_class->verify_chain = g_tls_file_database_gnutls_verify_chain;
 
   g_object_class_override_property (gobject_class, PROP_ANCHORS, "anchors");
 }
@@ -585,9 +636,9 @@ g_tls_file_database_gnutls_file_database_interface_init (GTlsFileDatabaseInterfa
 }
 
 static gboolean
-g_tls_file_database_gnutls_initable_init (GInitable    *initable,
-                                          GCancellable *cancellable,
-                                          GError      **error)
+g_tls_file_database_gnutls_initable_init (GInitable     *initable,
+                                          GCancellable  *cancellable,
+                                          GError       **error)
 {
   GTlsFileDatabaseGnutls *self = G_TLS_FILE_DATABASE_GNUTLS (initable);
   GHashTable *subjects, *issuers, *complete;

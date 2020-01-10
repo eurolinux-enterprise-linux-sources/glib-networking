@@ -15,6 +15,9 @@
  * You should have received a copy of the GNU Lesser General
  * Public License along with this library; if not, see
  * <http://www.gnu.org/licenses/>.
+ *
+ * In addition, when the library is used with OpenSSL, a special
+ * exception applies. Refer to the LICENSE_EXCEPTION file for details.
  */
 
 #include "config.h"
@@ -375,6 +378,7 @@ g_tls_certificate_gnutls_real_copy (GTlsCertificateGnutls    *gnutls,
   gnutls_datum_t data;
   guint num_certs = 0;
   size_t size = 0;
+  int status;
 
   /* We will do this loop twice. It's probably more efficient than
    * re-allocating memory.
@@ -401,7 +405,8 @@ g_tls_certificate_gnutls_real_copy (GTlsCertificateGnutls    *gnutls,
                               data.data, &size);
 
       gnutls_x509_crt_init (&cert);
-      gnutls_x509_crt_import (cert, &data, GNUTLS_X509_FMT_DER);
+      status = gnutls_x509_crt_import (cert, &data, GNUTLS_X509_FMT_DER);
+      g_warn_if_fail (status == 0);
       g_free (data.data);
 
       st->cert.x509[st->ncerts] = cert;
@@ -506,7 +511,8 @@ static const struct {
   { GNUTLS_CERT_NOT_ACTIVATED, G_TLS_CERTIFICATE_NOT_ACTIVATED },
   { GNUTLS_CERT_EXPIRED, G_TLS_CERTIFICATE_EXPIRED },
   { GNUTLS_CERT_REVOKED, G_TLS_CERTIFICATE_REVOKED },
-  { GNUTLS_CERT_INSECURE_ALGORITHM, G_TLS_CERTIFICATE_INSECURE }
+  { GNUTLS_CERT_INSECURE_ALGORITHM, G_TLS_CERTIFICATE_INSECURE },
+  { GNUTLS_CERT_UNEXPECTED_OWNER, G_TLS_CERTIFICATE_BAD_IDENTITY }
 };
 static const int flags_map_size = G_N_ELEMENTS (flags_map);
 
@@ -715,6 +721,10 @@ g_tls_certificate_gnutls_build_chain (const gnutls_datum_t  *certs,
   for (i = 0; i < num_certs; i++)
     {
       issuer = NULL;
+
+      /* Check if the cert issued itself */
+      if (gnutls_x509_crt_check_issuer (gnutls_certs[i], gnutls_certs[i]))
+        continue;
 
       if (i < num_certs - 1 &&
           gnutls_x509_crt_check_issuer (gnutls_certs[i], gnutls_certs[i + 1]))

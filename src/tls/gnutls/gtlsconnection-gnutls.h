@@ -8,6 +8,9 @@
  * your option) any later version.
  *
  * See the included COPYING file for more information.
+ *
+ * In addition, when the library is used with OpenSSL, a special
+ * exception applies. Refer to the LICENSE_EXCEPTION file for details.
  */
 
 #ifndef __G_TLS_CONNECTION_GNUTLS_H__
@@ -75,6 +78,19 @@ gboolean g_tls_connection_gnutls_check         (GTlsConnectionGnutls  *gnutls,
 GSource *g_tls_connection_gnutls_create_source (GTlsConnectionGnutls  *gnutls,
 						GIOCondition           condition,
 						GCancellable          *cancellable);
+
+typedef enum {
+	G_TLS_DIRECTION_NONE = 0,
+	G_TLS_DIRECTION_READ = 1 << 0,
+	G_TLS_DIRECTION_WRITE = 1 << 1,
+} GTlsDirection;
+
+#define G_TLS_DIRECTION_BOTH (G_TLS_DIRECTION_READ | G_TLS_DIRECTION_WRITE)
+
+gboolean g_tls_connection_gnutls_close_internal (GIOStream            *stream,
+                                                 GTlsDirection         direction,
+                                                 GCancellable         *cancellable,
+                                                 GError              **error);
 
 G_END_DECLS
 

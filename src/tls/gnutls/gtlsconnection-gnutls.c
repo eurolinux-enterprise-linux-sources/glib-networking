@@ -15,6 +15,9 @@
  * You should have received a copy of the GNU Lesser General
  * Public License along with this library; if not, see
  * <http://www.gnu.org/licenses/>.
+ *
+ * In addition, when the library is used with OpenSSL, a special
+ * exception applies. Refer to the LICENSE_EXCEPTION file for details.
  */
 
 #include "config.h"
@@ -35,6 +38,16 @@
 #ifdef HAVE_PKCS11
 #include <p11-kit/pin.h>
 #include "pkcs11/gpkcs11pin.h"
+#endif
+
+#ifdef G_OS_WIN32
+#include <winsock2.h>
+#include <winerror.h>
+
+/* It isn’t clear whether MinGW always defines EMSGSIZE. */
+#ifndef EMSGSIZE
+#define EMSGSIZE WSAEMSGSIZE
+#endif
 #endif
 
 #include <glib/gi18n-lib.h>
@@ -111,9 +124,9 @@ struct _GTlsConnectionGnutlsPrivate
   gboolean database_is_unset;
 
   /* need_handshake means the next claim_op() will get diverted into
-   * an implicit handshake (unless it's an OP_HANDSHAKE or OP_CLOSE).
+   * an implicit handshake (unless it's an OP_HANDSHAKE or OP_CLOSE*).
    * need_finish_handshake means the next claim_op() will get diverted
-   * into finish_handshake() (unless it's an OP_CLOSE).
+   * into finish_handshake() (unless it's an OP_CLOSE*).
    *
    * handshaking is TRUE as soon as a handshake thread is queued. For
    * a sync handshake it becomes FALSE after finish_handshake()
@@ -137,7 +150,10 @@ struct _GTlsConnectionGnutlsPrivate
   GError *handshake_error;
   GByteArray *app_data_buf;
 
-  gboolean closing, closed;
+  /* read_closed means the read direction has closed; write_closed similarly.
+   * If (and only if) both are set, the entire GTlsConnection is closed. */
+  gboolean read_closing, read_closed;
+  gboolean write_closing, write_closed;
 
   GInputStream *tls_istream;
   GOutputStream *tls_ostream;
@@ -194,52 +210,93 @@ g_tls_connection_gnutls_init (GTlsConnectionGnutls *gnutls)
   g_mutex_init (&gnutls->priv->op_mutex);
 }
 
-/* First field is "ssl3 only", second is "allow unsafe rehandshaking" */
+/* First field is "fallback", second is "allow unsafe rehandshaking" */
 static gnutls_priority_t priorities[2][2];
+
+#define DEFAULT_BASE_PRIORITY "NORMAL:%COMPAT:%LATEST_RECORD_VERSION"
 
 static void
 g_tls_connection_gnutls_init_priorities (void)
 {
   const gchar *base_priority;
-  gchar *ssl3_priority, *unsafe_rehandshake_priority, *ssl3_unsafe_rehandshake_priority;
-  int ret;
+  gchar *fallback_priority, *unsafe_rehandshake_priority, *fallback_unsafe_rehandshake_priority;
+  const guint *protos;
+  int ret, i, nprotos, fallback_proto;
 
   base_priority = g_getenv ("G_TLS_GNUTLS_PRIORITY");
   if (!base_priority)
-    base_priority = "NORMAL:%COMPAT";
+    base_priority = DEFAULT_BASE_PRIORITY;
   ret = gnutls_priority_init (&priorities[FALSE][FALSE], base_priority, NULL);
   if (ret == GNUTLS_E_INVALID_REQUEST)
     {
       g_warning ("G_TLS_GNUTLS_PRIORITY is invalid; ignoring!");
-      base_priority = "NORMAL:%COMPAT";
-      gnutls_priority_init (&priorities[FALSE][FALSE], base_priority, NULL);
+      base_priority = DEFAULT_BASE_PRIORITY;
+      ret = gnutls_priority_init (&priorities[FALSE][FALSE], base_priority, NULL);
+      g_warn_if_fail (ret == 0);
     }
 
-  ssl3_priority = g_strdup_printf ("%s:!VERS-TLS1.2:!VERS-TLS1.1:!VERS-TLS1.0", base_priority);
   unsafe_rehandshake_priority = g_strdup_printf ("%s:%%UNSAFE_RENEGOTIATION", base_priority);
-  ssl3_unsafe_rehandshake_priority = g_strdup_printf ("%s:!VERS-TLS1.2:!VERS-TLS1.1:!VERS-TLS1.0:%%UNSAFE_RENEGOTIATION", base_priority);
-
-  gnutls_priority_init (&priorities[TRUE][FALSE], ssl3_priority, NULL);
-  gnutls_priority_init (&priorities[FALSE][TRUE], unsafe_rehandshake_priority, NULL);
-  gnutls_priority_init (&priorities[TRUE][TRUE], ssl3_unsafe_rehandshake_priority, NULL);
-
-  g_free (ssl3_priority);
+  ret = gnutls_priority_init (&priorities[FALSE][TRUE], unsafe_rehandshake_priority, NULL);
+  g_warn_if_fail (ret == 0);
   g_free (unsafe_rehandshake_priority);
-  g_free (ssl3_unsafe_rehandshake_priority);
+
+  /* Figure out the lowest SSl/TLS version supported by base_priority */
+  nprotos = gnutls_priority_protocol_list (priorities[FALSE][FALSE], &protos);
+  fallback_proto = G_MAXUINT;
+  for (i = 0; i < nprotos; i++)
+    {
+      if (protos[i] < fallback_proto)
+	fallback_proto = protos[i];
+    }
+  if (fallback_proto == G_MAXUINT)
+    {
+      g_warning ("All GNUTLS protocol versions disabled?");
+      fallback_priority = g_strdup (base_priority);
+    }
+  else
+    {
+      gchar *cleaned_base, *p, *rest;
+
+      /* fallback_priority should be based on base_priority, except
+       * that we don't want %LATEST_RECORD_VERSION in it.
+       */
+      cleaned_base = g_strdup (base_priority);
+      p = strstr (cleaned_base, ":%LATEST_RECORD_VERSION");
+      if (p)
+	{
+	  rest = p + strlen (":%LATEST_RECORD_VERSION");
+	  memmove (p, rest, strlen (rest) + 1);
+	}
+
+      fallback_priority = g_strdup_printf ("%s:%%COMPAT:!VERS-TLS-ALL:+VERS-%s",
+					   cleaned_base,
+					   gnutls_protocol_get_name (fallback_proto));
+
+      g_free (cleaned_base);
+    }
+  fallback_unsafe_rehandshake_priority = g_strdup_printf ("%s:%%UNSAFE_RENEGOTIATION",
+							  fallback_priority);
+
+  ret = gnutls_priority_init (&priorities[TRUE][FALSE], fallback_priority, NULL);
+  g_warn_if_fail (ret == 0);
+  ret = gnutls_priority_init (&priorities[TRUE][TRUE], fallback_unsafe_rehandshake_priority, NULL);
+  g_warn_if_fail (ret == 0);
+  g_free (fallback_priority);
+  g_free (fallback_unsafe_rehandshake_priority);
 }
 
 static void
 g_tls_connection_gnutls_set_handshake_priority (GTlsConnectionGnutls *gnutls)
 {
-  gboolean use_ssl3, unsafe_rehandshake;
+  gboolean fallback, unsafe_rehandshake;
 
   if (G_IS_TLS_CLIENT_CONNECTION (gnutls))
-    use_ssl3 = g_tls_client_connection_get_use_ssl3 (G_TLS_CLIENT_CONNECTION (gnutls));
+    fallback = g_tls_client_connection_get_use_ssl3 (G_TLS_CLIENT_CONNECTION (gnutls));
   else
-    use_ssl3 = FALSE;
+    fallback = FALSE;
   unsafe_rehandshake = (gnutls->priv->rehandshake_mode == G_TLS_REHANDSHAKE_UNSAFELY);
   gnutls_priority_set (gnutls->priv->session,
-		       priorities[use_ssl3][unsafe_rehandshake]);
+		       priorities[fallback][unsafe_rehandshake]);
 }
 
 static gboolean
@@ -248,15 +305,14 @@ g_tls_connection_gnutls_initable_init (GInitable     *initable,
 				       GError       **error)
 {
   GTlsConnectionGnutls *gnutls = G_TLS_CONNECTION_GNUTLS (initable);
+  gboolean client = G_IS_TLS_CLIENT_CONNECTION (gnutls);
+  guint flags = client ? GNUTLS_CLIENT : GNUTLS_SERVER;
   int status;
 
   g_return_val_if_fail (gnutls->priv->base_istream != NULL &&
 			gnutls->priv->base_ostream != NULL, FALSE);
 
-  /* Make sure gnutls->priv->session has been initialized (it may have
-   * already been initialized by a construct-time property setter).
-   */
-  g_tls_connection_gnutls_get_session (gnutls);
+  gnutls_init (&gnutls->priv->session, flags);
 
   status = gnutls_credentials_set (gnutls->priv->session,
 				   GNUTLS_CRD_CERTIFICATE,
@@ -268,11 +324,6 @@ g_tls_connection_gnutls_initable_init (GInitable     *initable,
 		   gnutls_strerror (status));
       return FALSE;
     }
-
-  /* Some servers (especially on embedded devices) use tiny keys that
-   * gnutls will reject by default. We want it to accept them.
-   */
-  gnutls_dh_set_prime_bits (gnutls->priv->session, 256);
 
   gnutls_transport_set_push_function (gnutls->priv->session,
 				      g_tls_connection_gnutls_push_func);
@@ -318,6 +369,14 @@ g_tls_connection_gnutls_finalize (GObject *object)
   g_clear_error (&gnutls->priv->handshake_error);
   g_clear_error (&gnutls->priv->read_error);
   g_clear_error (&gnutls->priv->write_error);
+
+  /* This must always be NULL at this, as it holds a referehce to @gnutls as
+   * its source object. However, we clear it anyway just in case this changes
+   * in future. */
+  g_clear_object (&gnutls->priv->implicit_handshake);
+
+  g_clear_object (&gnutls->priv->read_cancellable);
+  g_clear_object (&gnutls->priv->write_cancellable);
 
   g_clear_object (&gnutls->priv->waiting_for_op);
   g_mutex_clear (&gnutls->priv->op_mutex);
@@ -474,18 +533,6 @@ g_tls_connection_gnutls_get_credentials (GTlsConnectionGnutls *gnutls)
 gnutls_session_t
 g_tls_connection_gnutls_get_session (GTlsConnectionGnutls *gnutls)
 {
-  /* Ideally we would initialize gnutls->priv->session from
-   * g_tls_connection_gnutls_init(), but we can't tell if it's a
-   * client or server connection at that point... And
-   * g_tls_connection_gnutls_initiable_init() is too late, because
-   * construct-time property setters may need to modify it.
-   */
-  if (!gnutls->priv->session)
-    {
-      gboolean client = G_IS_TLS_CLIENT_CONNECTION (gnutls);
-      gnutls_init (&gnutls->priv->session, client ? GNUTLS_CLIENT : GNUTLS_SERVER);
-    }
-
   return gnutls->priv->session;
 }
 
@@ -509,7 +556,9 @@ typedef enum {
   G_TLS_CONNECTION_GNUTLS_OP_HANDSHAKE,
   G_TLS_CONNECTION_GNUTLS_OP_READ,
   G_TLS_CONNECTION_GNUTLS_OP_WRITE,
-  G_TLS_CONNECTION_GNUTLS_OP_CLOSE,
+  G_TLS_CONNECTION_GNUTLS_OP_CLOSE_READ,
+  G_TLS_CONNECTION_GNUTLS_OP_CLOSE_WRITE,
+  G_TLS_CONNECTION_GNUTLS_OP_CLOSE_BOTH,
 } GTlsConnectionGnutlsOp;
 
 static gboolean
@@ -525,7 +574,12 @@ claim_op (GTlsConnectionGnutls    *gnutls,
 
   g_mutex_lock (&gnutls->priv->op_mutex);
 
-  if (gnutls->priv->closing || gnutls->priv->closed)
+  if (((op == G_TLS_CONNECTION_GNUTLS_OP_HANDSHAKE ||
+        op == G_TLS_CONNECTION_GNUTLS_OP_READ) &&
+       (gnutls->priv->read_closing || gnutls->priv->read_closed)) ||
+      ((op == G_TLS_CONNECTION_GNUTLS_OP_HANDSHAKE ||
+        op == G_TLS_CONNECTION_GNUTLS_OP_WRITE) &&
+       (gnutls->priv->write_closing || gnutls->priv->write_closed)))
     {
       g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_CLOSED,
 			   _("Connection is closed"));
@@ -533,7 +587,10 @@ claim_op (GTlsConnectionGnutls    *gnutls,
       return FALSE;
     }
 
-  if (gnutls->priv->handshake_error && op != G_TLS_CONNECTION_GNUTLS_OP_CLOSE)
+  if (gnutls->priv->handshake_error &&
+      op != G_TLS_CONNECTION_GNUTLS_OP_CLOSE_BOTH &&
+      op != G_TLS_CONNECTION_GNUTLS_OP_CLOSE_READ &&
+      op != G_TLS_CONNECTION_GNUTLS_OP_CLOSE_WRITE)
     {
       if (error)
 	*error = g_error_copy (gnutls->priv->handshake_error);
@@ -541,10 +598,12 @@ claim_op (GTlsConnectionGnutls    *gnutls,
       return FALSE;
     }
 
-  if (op != G_TLS_CONNECTION_GNUTLS_OP_HANDSHAKE &&
-      op != G_TLS_CONNECTION_GNUTLS_OP_CLOSE)
+  if (op != G_TLS_CONNECTION_GNUTLS_OP_HANDSHAKE)
     {
-      if (gnutls->priv->need_handshake)
+      if (op != G_TLS_CONNECTION_GNUTLS_OP_CLOSE_BOTH &&
+          op != G_TLS_CONNECTION_GNUTLS_OP_CLOSE_READ &&
+          op != G_TLS_CONNECTION_GNUTLS_OP_CLOSE_WRITE &&
+          gnutls->priv->need_handshake)
 	{
 	  gnutls->priv->need_handshake = FALSE;
 	  gnutls->priv->handshaking = TRUE;
@@ -568,12 +627,17 @@ claim_op (GTlsConnectionGnutls    *gnutls,
 	  g_clear_object (&gnutls->priv->implicit_handshake);
 	  g_mutex_lock (&gnutls->priv->op_mutex);
 
-	  if (!success || g_cancellable_set_error_if_cancelled (cancellable, &my_error))
+	  if (op != G_TLS_CONNECTION_GNUTLS_OP_CLOSE_BOTH &&
+	      op != G_TLS_CONNECTION_GNUTLS_OP_CLOSE_READ &&
+	      op != G_TLS_CONNECTION_GNUTLS_OP_CLOSE_WRITE &&
+	      (!success || g_cancellable_set_error_if_cancelled (cancellable, &my_error)))
 	    {
 	      g_propagate_error (error, my_error);
 	      g_mutex_unlock (&gnutls->priv->op_mutex);
 	      return FALSE;
 	    }
+
+          g_clear_error (&my_error);
 	}
     }
 
@@ -600,8 +664,11 @@ claim_op (GTlsConnectionGnutls    *gnutls,
 	nfds = 2;
       else
 	nfds = 1;
+
       g_poll (fds, nfds, -1);
-      g_cancellable_release_fd (cancellable);
+
+      if (nfds > 1)
+        g_cancellable_release_fd (cancellable);
 
       goto try_again;
     }
@@ -611,8 +678,12 @@ claim_op (GTlsConnectionGnutls    *gnutls,
       gnutls->priv->handshaking = TRUE;
       gnutls->priv->need_handshake = FALSE;
     }
-  if (op == G_TLS_CONNECTION_GNUTLS_OP_CLOSE)
-    gnutls->priv->closing = TRUE;
+  if (op == G_TLS_CONNECTION_GNUTLS_OP_CLOSE_BOTH ||
+      op == G_TLS_CONNECTION_GNUTLS_OP_CLOSE_READ)
+    gnutls->priv->read_closing = TRUE;
+  if (op == G_TLS_CONNECTION_GNUTLS_OP_CLOSE_BOTH ||
+      op == G_TLS_CONNECTION_GNUTLS_OP_CLOSE_WRITE)
+    gnutls->priv->write_closing = TRUE;
 
   if (op != G_TLS_CONNECTION_GNUTLS_OP_WRITE)
     gnutls->priv->reading = TRUE;
@@ -631,8 +702,12 @@ yield_op (GTlsConnectionGnutls   *gnutls,
 
   if (op == G_TLS_CONNECTION_GNUTLS_OP_HANDSHAKE)
     gnutls->priv->handshaking = FALSE;
-  if (op == G_TLS_CONNECTION_GNUTLS_OP_CLOSE)
-    gnutls->priv->closing = FALSE;
+  if (op == G_TLS_CONNECTION_GNUTLS_OP_CLOSE_BOTH ||
+      op == G_TLS_CONNECTION_GNUTLS_OP_CLOSE_READ)
+    gnutls->priv->read_closing = FALSE;
+  if (op == G_TLS_CONNECTION_GNUTLS_OP_CLOSE_BOTH ||
+      op == G_TLS_CONNECTION_GNUTLS_OP_CLOSE_WRITE)
+    gnutls->priv->write_closing = FALSE;
 
   if (op != G_TLS_CONNECTION_GNUTLS_OP_WRITE)
     gnutls->priv->reading = FALSE;
@@ -818,7 +893,11 @@ g_tls_connection_gnutls_check (GTlsConnectionGnutls  *gnutls,
   /* If a handshake or close is in progress, then tls_istream and
    * tls_ostream are blocked, regardless of the base stream status.
    */
-  if (gnutls->priv->handshaking || gnutls->priv->closing)
+  if (gnutls->priv->handshaking)
+    return FALSE;
+
+  if (((condition & G_IO_IN) && gnutls->priv->read_closing) ||
+      ((condition & G_IO_OUT) && gnutls->priv->write_closing))
     return FALSE;
 
   if (condition & G_IO_IN)
@@ -1233,7 +1312,7 @@ accept_peer_certificate (GTlsConnectionGnutls *gnutls,
 			 GTlsCertificate      *peer_certificate,
 			 GTlsCertificateFlags  peer_certificate_errors)
 {
-  gboolean accepted;
+  gboolean accepted = FALSE;
 
   if (G_IS_TLS_CLIENT_CONNECTION (gnutls))
     {
@@ -1242,14 +1321,9 @@ accept_peer_certificate (GTlsConnectionGnutls *gnutls,
 
       if ((peer_certificate_errors & validation_flags) == 0)
 	accepted = TRUE;
-      else
-	{
-	  accepted = g_tls_connection_emit_accept_certificate (G_TLS_CONNECTION (gnutls),
-							       peer_certificate,
-							       peer_certificate_errors);
-	}
     }
-  else
+
+  if (!accepted)
     {
       accepted = g_tls_connection_emit_accept_certificate (G_TLS_CONNECTION (gnutls),
 							   peer_certificate,
@@ -1312,6 +1386,7 @@ g_tls_connection_gnutls_handshake (GTlsConnection   *conn,
   GError *my_error = NULL;
 
   task = g_task_new (conn, cancellable, NULL, NULL);
+  g_task_set_source_tag (task, g_tls_connection_gnutls_handshake);
   begin_handshake (gnutls);
   g_task_run_in_thread_sync (task, handshake_thread);
   success = finish_handshake (gnutls, task, &my_error);
@@ -1397,12 +1472,14 @@ g_tls_connection_gnutls_handshake_async (GTlsConnection       *conn,
   GTask *thread_task, *caller_task;
 
   caller_task = g_task_new (conn, cancellable, callback, user_data);
+  g_task_set_source_tag (caller_task, g_tls_connection_gnutls_handshake_async);
   g_task_set_priority (caller_task, io_priority);
 
   begin_handshake (G_TLS_CONNECTION_GNUTLS (conn));
 
   thread_task = g_task_new (conn, cancellable,
 			    handshake_thread_completed, caller_task);
+  g_task_set_source_tag (thread_task, g_tls_connection_gnutls_handshake_async);
   g_task_set_priority (thread_task, io_priority);
   g_task_run_in_thread (thread_task, async_handshake_thread);
   g_object_unref (thread_task);
@@ -1427,6 +1504,8 @@ do_implicit_handshake (GTlsConnectionGnutls  *gnutls,
   /* We have op_mutex */
 
   gnutls->priv->implicit_handshake = g_task_new (gnutls, cancellable, NULL, NULL);
+  g_task_set_source_tag (gnutls->priv->implicit_handshake,
+                         do_implicit_handshake);
 
   begin_handshake (gnutls);
 
@@ -1546,45 +1625,88 @@ g_tls_connection_gnutls_get_output_stream (GIOStream *stream)
   return gnutls->priv->tls_ostream;
 }
 
-static gboolean
-g_tls_connection_gnutls_close (GIOStream     *stream,
-			       GCancellable  *cancellable,
-			       GError       **error)
+gboolean
+g_tls_connection_gnutls_close_internal (GIOStream     *stream,
+                                        GTlsDirection  direction,
+                                        GCancellable  *cancellable,
+                                        GError       **error)
 {
   GTlsConnectionGnutls *gnutls = G_TLS_CONNECTION_GNUTLS (stream);
-  gboolean success;
+  GTlsConnectionGnutlsOp op;
+  gboolean success = TRUE;
   int ret = 0;
+  GError *gnutls_error = NULL, *stream_error = NULL;
 
-  if (!claim_op (gnutls, G_TLS_CONNECTION_GNUTLS_OP_CLOSE,
-		 TRUE, cancellable, error))
+  /* This can be called from g_io_stream_close(), g_input_stream_close() or
+   * g_output_stream_close(). In all cases, we only do the gnutls_bye() for
+   * writing. The difference is how we set the flags on this class and how
+   * the underlying stream is closed.
+   */
+
+  g_return_val_if_fail (direction != G_TLS_DIRECTION_NONE, FALSE);
+
+  if (direction == G_TLS_DIRECTION_BOTH)
+    op = G_TLS_CONNECTION_GNUTLS_OP_CLOSE_BOTH;
+  else if (direction == G_TLS_DIRECTION_READ)
+    op = G_TLS_CONNECTION_GNUTLS_OP_CLOSE_READ;
+  else
+    op = G_TLS_CONNECTION_GNUTLS_OP_CLOSE_WRITE;
+
+  if (!claim_op (gnutls, op, TRUE, cancellable, error))
     return FALSE;
 
-  if (gnutls->priv->closed)
-    {
-      yield_op (gnutls, G_TLS_CONNECTION_GNUTLS_OP_CLOSE);
-      return TRUE;
-    }
-
-  if (gnutls->priv->ever_handshaked)
+  if (gnutls->priv->ever_handshaked && !gnutls->priv->write_closed &&
+      direction & G_TLS_DIRECTION_WRITE)
     {
       BEGIN_GNUTLS_IO (gnutls, G_IO_IN | G_IO_OUT, TRUE, cancellable);
       ret = gnutls_bye (gnutls->priv->session, GNUTLS_SHUT_WR);
       END_GNUTLS_IO (gnutls, G_IO_IN | G_IO_OUT, ret,
-		     _("Error performing TLS close: %s"), error);
+		     _("Error performing TLS close: %s"), &gnutls_error);
+
+      gnutls->priv->write_closed = TRUE;
     }
 
-  gnutls->priv->closed = TRUE;
+  if (!gnutls->priv->read_closed && direction & G_TLS_DIRECTION_READ)
+    gnutls->priv->read_closed = TRUE;
 
+  /* Close the underlying streams. Do this even if the gnutls_bye() call failed,
+   * as the parent GIOStream will have set its internal closed flag and hence
+   * this implementation will never be called again. */
+  if (direction == G_TLS_DIRECTION_BOTH)
+    success = g_io_stream_close (gnutls->priv->base_io_stream,
+                                 cancellable, &stream_error);
+  else if (direction & G_TLS_DIRECTION_READ)
+    success = g_input_stream_close (g_io_stream_get_input_stream (gnutls->priv->base_io_stream),
+                                    cancellable, &stream_error);
+  else if (direction & G_TLS_DIRECTION_WRITE)
+    success = g_output_stream_close (g_io_stream_get_output_stream (gnutls->priv->base_io_stream),
+                                     cancellable, &stream_error);
+
+  yield_op (gnutls, op);
+
+  /* Propagate errors. */
   if (ret != 0)
     {
-      yield_op (gnutls, G_TLS_CONNECTION_GNUTLS_OP_CLOSE);
-      return FALSE;
+      g_propagate_error (error, gnutls_error);
+      g_clear_error (&stream_error);
+    }
+  else if (!success)
+    {
+      g_propagate_error (error, stream_error);
+      g_clear_error (&gnutls_error);
     }
 
-  success = g_io_stream_close (gnutls->priv->base_io_stream,
-			       cancellable, error);
-  yield_op (gnutls, G_TLS_CONNECTION_GNUTLS_OP_CLOSE);
-  return success;
+  return success && (ret == 0);
+}
+
+static gboolean
+g_tls_connection_gnutls_close (GIOStream     *stream,
+                               GCancellable  *cancellable,
+                               GError       **error)
+{
+	return g_tls_connection_gnutls_close_internal (stream,
+	                                               G_TLS_DIRECTION_BOTH,
+	                                               cancellable, error);
 }
 
 /* We do async close as synchronous-in-a-thread so we don't need to
@@ -1600,7 +1722,8 @@ close_thread (GTask        *task,
   GIOStream *stream = object;
   GError *error = NULL;
 
-  if (!g_tls_connection_gnutls_close (stream, cancellable, &error))
+  if (!g_tls_connection_gnutls_close_internal (stream, G_TLS_DIRECTION_BOTH,
+                                               cancellable, &error))
     g_task_return_error (task, error);
   else
     g_task_return_boolean (task, TRUE);
@@ -1616,6 +1739,7 @@ g_tls_connection_gnutls_close_async (GIOStream           *stream,
   GTask *task;
 
   task = g_task_new (stream, cancellable, callback, user_data);
+  g_task_set_source_tag (task, g_tls_connection_gnutls_close_async);
   g_task_set_priority (task, io_priority);
   g_task_run_in_thread (task, close_thread);
   g_object_unref (task);
@@ -1670,6 +1794,7 @@ on_pin_prompt_callback (const char     *pinfile,
       pin = NULL;
       break;
     case G_TLS_INTERACTION_UNHANDLED:
+    default:
       pin = NULL;
       break;
     case G_TLS_INTERACTION_HANDLED:

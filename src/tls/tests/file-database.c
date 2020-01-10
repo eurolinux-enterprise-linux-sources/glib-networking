@@ -16,6 +16,9 @@
  * Public License along with this library; if not, see
  * <http://www.gnu.org/licenses/>.
  *
+ * In addition, when the library is used with OpenSSL, a special
+ * exception applies. Refer to the LICENSE_EXCEPTION file for details.
+ *
  * Author: Stef Walter <stefw@collabora.co.uk>
  */
 
@@ -240,7 +243,7 @@ load_certificate_chain (const char  *filename,
                         GError     **error)
 {
   GList *certificates;
-  GTlsCertificate *chain = NULL;
+  GTlsCertificate *chain = NULL, *prev_chain = NULL;
   GTlsBackend *backend;
   GByteArray *der;
   GList *l;
@@ -253,12 +256,14 @@ load_certificate_chain (const char  *filename,
   certificates = g_list_reverse (certificates);
   for (l = certificates; l != NULL; l = g_list_next (l))
     {
+      prev_chain = chain;
       g_object_get (l->data, "certificate", &der, NULL);
       chain = g_object_new (g_tls_backend_get_certificate_type (backend),
                             "certificate", der,
-                            "issuer", chain,
+                            "issuer", prev_chain,
                             NULL);
       g_byte_array_unref (der);
+      g_clear_object (&prev_chain);
     }
 
   g_list_free_full (certificates, g_object_unref);
@@ -461,7 +466,14 @@ certificate_is_in_list (GList *certificates,
 static void
 test_lookup_certificates_issued_by (void)
 {
-  /* This data is generated from the frob-certificate test tool in gcr library */
+  /* This data is generated from the frob-certificate test tool in gcr library.
+   * To regenerate (from e.g. a directory containing gcr and glib-networking):
+   *
+   * $ gcr/frob-certificate glib-networking/tls/tests/files/ca.pem
+   *
+   * Then copy the hex that is printed after "subject" (not "issuer"!) and add
+   * the missing 'x's.
+   */
   const guchar ISSUER[] = "\x30\x81\x86\x31\x13\x30\x11\x06\x0A\x09\x92\x26\x89\x93\xF2"
                           "\x2C\x64\x01\x19\x16\x03\x43\x4F\x4D\x31\x17\x30\x15\x06\x0A"
                           "\x09\x92\x26\x89\x93\xF2\x2C\x64\x01\x19\x16\x07\x45\x58\x41"
@@ -501,7 +513,6 @@ test_lookup_certificates_issued_by (void)
 
   g_list_free_full (certificates, g_object_unref);
   g_object_unref (database);
-  g_byte_array_unref (issuer_dn);
 }
 
 static void

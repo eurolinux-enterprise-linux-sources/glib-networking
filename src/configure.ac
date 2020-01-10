@@ -1,7 +1,7 @@
 AC_PREREQ(2.65)
 AC_CONFIG_MACRO_DIR([m4])
 
-AC_INIT([glib-networking],[2.42.0],[http://bugzilla.gnome.org/enter_bug.cgi?product=glib&component=network])
+AC_INIT([glib-networking],[2.50.0],[http://bugzilla.gnome.org/enter_bug.cgi?product=glib&component=network])
 
 AC_CONFIG_SRCDIR([proxy/libproxy/glibproxyresolver.h])
 AC_CONFIG_HEADERS([config.h])
@@ -20,21 +20,20 @@ AC_PROG_CPP
 dnl Checks for libraries.
 
 dnl ****************************
-dnl *** Checks for intltool  ***
+dnl *** Checks for gettext   ***
 dnl ****************************
+AM_GNU_GETTEXT_VERSION([0.19.4])
+AM_GNU_GETTEXT([external])
 
-IT_PROG_INTLTOOL([0.35.0])
 GETTEXT_PACKAGE=glib-networking
-
 AC_SUBST([GETTEXT_PACKAGE])
 AC_DEFINE_UNQUOTED([GETTEXT_PACKAGE],["$GETTEXT_PACKAGE"],[The gettext domain name])
-AM_GLIB_GNU_GETTEXT
 
 dnl *****************************
 dnl *** Check GLib GIO        ***
 dnl *****************************
-AM_PATH_GLIB_2_0(2.39.1,,AC_MSG_ERROR(GLIB not found),gio)
-GLIB_CFLAGS="$GLIB_CFLAGS -DGLIB_VERSION_MIN_REQUIRED=GLIB_VERSION_2_40"
+AM_PATH_GLIB_2_0(2.46.0,,AC_MSG_ERROR(GLIB not found),gio)
+GLIB_CFLAGS="$GLIB_CFLAGS -DGLIB_VERSION_MIN_REQUIRED=GLIB_VERSION_2_46"
 
 GIO_MODULE_DIR=$($PKG_CONFIG --variable giomoduledir gio-2.0)
 AS_IF([test "$GIO_MODULE_DIR" = ""],
@@ -84,7 +83,7 @@ dnl *****************************
 dnl *** Checks for GNUTLS     ***
 dnl *****************************
 
-GNUTLS_MIN_REQUIRED=2.12.8
+GNUTLS_MIN_REQUIRED=3.0
 
 AC_ARG_WITH(gnutls,
     [AC_HELP_STRING([--with-gnutls],
