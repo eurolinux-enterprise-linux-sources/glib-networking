@@ -1,11 +1,11 @@
-/* -*- Mode: C; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /*
  * Copyright (C) 2011 Collabora Ltd.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * version 2 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -28,16 +28,29 @@
 G_BEGIN_DECLS
 
 #define MOCK_TYPE_INTERACTION         (mock_interaction_get_type ())
+#define MOCK_INTERACTION(o)           (G_TYPE_CHECK_INSTANCE_CAST ((o), MOCK_TYPE_INTERACTION, MockInteraction))
+#define MOCK_INTERACTION_CLASS(k)     (G_TYPE_CHECK_CLASS_CAST((k), MOCK_TYPE_INTERACTION, MockInteractionClass))
+#define MOCK_IS_INTERACTION(o)        (G_TYPE_CHECK_INSTANCE_TYPE ((o), MOCK_TYPE_INTERACTION))
+#define MOCK_IS_INTERACTION_CLASS(k)  (G_TYPE_CHECK_CLASS_TYPE ((k), MOCK_TYPE_INTERACTION))
+#define MOCK_INTERACTION_GET_CLASS(o) (G_TYPE_INSTANCE_GET_CLASS ((o), MOCK_TYPE_INTERACTION, MockInteractionClass))
 
-G_DECLARE_FINAL_TYPE (MockInteraction, mock_interaction, MOCK, INTERACTION, GTlsInteraction)
+typedef struct _MockInteraction         MockInteraction;
+typedef struct _MockInteractionClass    MockInteractionClass;
 
-GTlsInteraction *mock_interaction_new_static_password       (const gchar *password);
+struct _MockInteraction
+{
+  GTlsInteraction parent_instance;
+  gchar *static_password;
+};
 
-GTlsInteraction *mock_interaction_new_static_certificate    (GTlsCertificate *cert);
+struct _MockInteractionClass
+{
+  GTlsInteractionClass parent_class;
+};
 
-GTlsInteraction *mock_interaction_new_static_error          (GQuark domain,
-                                                             gint code,
-                                                             const gchar *message);
+
+GType            mock_interaction_get_type   (void);
+GTlsInteraction *mock_interaction_new_static       (const gchar *password);
 
 G_END_DECLS
 

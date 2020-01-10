@@ -1,13 +1,11 @@
-/* -*- Mode: C; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/*
- * GIO - GLib Input, Output and Streaming Library
+/* GIO - GLib Input, Output and Streaming Library
  *
  * Copyright 2011 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * version 2 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -42,22 +40,19 @@ static GMainLoop *loop;
 
 static void
 got_proxies (GObject      *source,
-             GAsyncResult *result,
-             gpointer      user_data)
+	     GAsyncResult *result,
+	     gpointer      user_data)
 {
   GDBusMethodInvocation *invocation = user_data;
   gchar **proxies;
   GError *error = NULL;
 
   proxies = g_proxy_resolver_lookup_finish (resolver, result, &error);
-  if (error)
-    g_dbus_method_invocation_take_error (invocation, error);
-  else
-    {
-      g_dbus_method_invocation_return_value (invocation,
-                                             g_variant_new ("(^as)", proxies));
-      g_strfreev (proxies);
-    }
+  g_assert (!error);
+
+  g_dbus_method_invocation_return_value (invocation,
+					 g_variant_new ("(^as)", proxies));
+  g_strfreev (proxies);
 }
 
 static void
@@ -85,7 +80,7 @@ handle_method_call (GDBusConnection       *connection,
     g_setenv ("http_proxy", "wpad://", TRUE);
 
   g_proxy_resolver_lookup_async (resolver, lookup_url,
-                                 NULL, got_proxies, invocation);
+				 NULL, got_proxies, invocation);
 }
 
 static const GDBusInterfaceVTable interface_vtable =
@@ -105,12 +100,12 @@ on_bus_acquired (GDBusConnection *connection,
 
   introspection_data = g_dbus_node_info_new_for_xml (introspection_xml, NULL);
   g_dbus_connection_register_object (connection,
-                                     "/org/gtk/GLib/PACRunner",
-                                     introspection_data->interfaces[0],
-                                     &interface_vtable,
-                                     NULL,
-                                     NULL,
-                                     &error);
+				     "/org/gtk/GLib/PACRunner",
+				     introspection_data->interfaces[0],
+				     &interface_vtable,
+				     NULL,
+				     NULL,
+				     &error);
   if (error)
     g_error ("Could not register server: %s", error->message);
 }
@@ -139,10 +134,6 @@ main (int argc, char *argv[])
   g_unsetenv ("GNOME_DESKTOP_SESSION_ID");
   g_unsetenv ("DESKTOP_SESSION");
   g_unsetenv ("KDE_FULL_SESSION");
-
-  /* Unset variables that libproxy would look at if it were smarter, and which
-   * it might possibly look at in the future. Just covering our bases. */
-  g_unsetenv ("XDG_CURRENT_DESKTOP");
 
   /* Unset static proxy settings */
   g_unsetenv ("http_proxy");

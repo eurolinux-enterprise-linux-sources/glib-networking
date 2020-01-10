@@ -1,25 +1,21 @@
-%define glib2_version 2.55.1
+%define glib2_version 2.35.8
 
 Name:           glib-networking
-Version:        2.56.1
-Release:        1%{?dist}
+Version:        2.36.2
+Release:        3%{?dist}
 Summary:        Networking support for GLib
 
+Group:          Development/Libraries
 License:        LGPLv2+
 URL:            http://www.gnome.org
-Source0:        http://download.gnome.org/sources/glib-networking/2.56/%{name}-%{version}.tar.xz
+Source:         http://download.gnome.org/sources/glib-networking/2.36/%{name}-%{version}.tar.xz
 
-# Downstream RHEL patches:
-Patch0:         glib-networking-python2.patch
-
-BuildRequires:  gettext
 BuildRequires:  glib2-devel >= %{glib2_version}
 BuildRequires:  libproxy-devel
 BuildRequires:  gnutls-devel
+BuildRequires:  intltool
 BuildRequires:  ca-certificates
 BuildRequires:  gsettings-desktop-schemas-devel
-BuildRequires:  meson
-BuildRequires:  systemd
 
 Requires:       ca-certificates
 Requires:       glib2%{?_isa} >= %{glib2_version}
@@ -31,23 +27,20 @@ GIO. In particular, it contains libproxy- and GSettings-based
 GProxyResolver implementations and a gnutls-based GTlsConnection
 implementation.
 
-%package tests
-Summary: Tests for the glib-networking package
-Requires: %{name}%{?_isa} = %{version}-%{release}
-
-%description tests
-The glib-networking-tests package contains tests that can be used to verify
-the functionality of the installed glib-networking package.
-
 %prep
-%autosetup -p1
+%setup -q
+
 
 %build
-%meson -Dinstalled_tests=true
-%meson_build
+%configure --disable-static --with-libproxy
+
+make %{?_smp_mflags} V=1
+
 
 %install
-%meson_install
+make install DESTDIR=$RPM_BUILD_ROOT
+
+rm -f $RPM_BUILD_ROOT%{_libdir}/gio/modules/*.la
 
 %find_lang %{name}
 
@@ -58,36 +51,15 @@ gio-querymodules-%{__isa_bits} %{_libdir}/gio/modules
 gio-querymodules-%{__isa_bits} %{_libdir}/gio/modules
 
 %files -f %{name}.lang
-%license COPYING
-%doc NEWS README
+%doc COPYING NEWS README
 %{_libdir}/gio/modules/libgiolibproxy.so
 %{_libdir}/gio/modules/libgiognomeproxy.so
 %{_libdir}/gio/modules/libgiognutls.so
 %{_libexecdir}/glib-pacrunner
 %{_datadir}/dbus-1/services/org.gtk.GLib.PACRunner.service
-%{_userunitdir}/glib-pacrunner.service
 
-%files tests
-%{_libexecdir}/installed-tests/glib-networking
-%{_datadir}/installed-tests
 
 %changelog
-* Tue May 22 2018 Kalev Lember <klember@redhat.com> - 2.56.1-1
-- Update to 2.56.1
-- Resolves: #1567374
-
-* Mon Sep 19 2016 Kalev Lember <klember@redhat.com> - 2.50.0-1
-- Update to 2.50.0
-- Resolves: #1386876
-- Resolves: #1367484
-
-* Mon Apr 27 2015 Dan Winship <danw@redhat.com> - 2.42.0-1
-- Update to 2.42.0
-- Resolves: #1174447
-
-* Wed Jul 23 2014 Dan Winship <danw@redhat.com> - 2.40.0-1
-- Update to 2.40.0
-
 * Fri Jan 24 2014 Daniel Mach <dmach@redhat.com> - 2.36.2-3
 - Mass rebuild 2014-01-24
 

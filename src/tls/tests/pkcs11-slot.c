@@ -1,13 +1,11 @@
-/* -*- Mode: C; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/*
- * GIO TLS tests
+/* GIO TLS tests
  *
  * Copyright (C) 2011 Collabora, Ltd.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * version 2 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -15,11 +13,9 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General
- * Public License along with this library; if not, see
- * <http://www.gnu.org/licenses/>.
- *
- * In addition, when the library is used with OpenSSL, a special
- * exception applies. Refer to the LICENSE_EXCEPTION file for details.
+ * Public License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place, Suite 330,
+ * Boston, MA 02111-1307, USA.
  *
  * Author: Stef Walter <stefw@collabora.co.uk>
  */
@@ -54,7 +50,7 @@ setup_slot (TestSlot        *test,
   /* Copy this so we can replace certain functions in our tests */
   memcpy (&test->funcs, &mock_default_functions, sizeof (test->funcs));
 
-  rv = p11_kit_module_initialize (&test->funcs);
+  rv = p11_kit_initialize_module (&test->funcs);
   g_assert (rv == CKR_OK);
 
   test->slot = g_object_new (G_TYPE_PKCS11_SLOT,
@@ -82,7 +78,7 @@ teardown_slot (TestSlot     *test,
   g_assert_cmpint (G_OBJECT (test->not_present)->ref_count, ==, 1);
   g_object_unref (test->not_present);
 
-  rv = p11_kit_module_finalize (&test->funcs);
+  rv = p11_kit_finalize_module (&test->funcs);
   g_assert (rv == CKR_OK);
 }
 
@@ -467,7 +463,7 @@ test_enumerate_private (TestSlot     *test,
 
   /* This time we log in, and should have a match */
   results = g_ptr_array_new_with_free_func ((GDestroyNotify)g_pkcs11_array_unref);
-  interaction = mock_interaction_new_static_password (MOCK_SLOT_ONE_PIN);
+  interaction = mock_interaction_new_static (MOCK_SLOT_ONE_PIN);
 
   state = g_pkcs11_slot_enumerate (test->slot, interaction,
                                    match->attrs, match->count, TRUE,
